@@ -1,8 +1,12 @@
+# General, non-promotional KIS cost assumptions for listed stocks (2026-07-16).
+# 1 bp = 0.01%. Replace commission/FX values if the account has negotiated or event rates.
 KR:
   initial_cash: 3000000
-  commission_bps_each_side: 5
+  # BanKIS KRX online stock commission: 0.0140527% per side.
+  commission_bps_each_side: 1.40527
   slippage_bps_each_side: 5
-  sell_tax_bps: null  # Set from the current official KIS/exchange schedule before a session.
+  # 2026 listed-stock sell tax: KOSPI 0.05% + rural tax 0.15%; KOSDAQ 0.20%.
+  sell_tax_bps: 20
   fx_bps_each_side: 0
   trade_risk_pct: 0.4
   daily_loss_limit_pct: 2.0
@@ -22,9 +26,12 @@ KR:
   indicator_max_age_seconds: 3
 US:
   initial_cash: 1500
-  commission_bps_each_side: 10
+  # KIS standard online US stock commission: 0.25% per side (promotions excluded).
+  commission_bps_each_side: 25
   slippage_bps_each_side: 5
-  sell_tax_bps: null  # Set current SEC/TAF-equivalent sell costs before a session.
+  # SEC Fee: 0.00206% of sell notional. Share-based regulatory fees are not modeled here.
+  sell_tax_bps: 0.206
+  # Conservative FX-spread assumption. Set to 0 when trading from an existing USD balance.
   fx_bps_each_side: 10
   trade_risk_pct: 0.4
   daily_loss_limit_pct: 2.0

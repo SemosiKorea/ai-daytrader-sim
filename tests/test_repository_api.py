@@ -20,6 +20,7 @@ def _settings(tmp_path) -> Settings:
         encoding="utf-8",
     )
     return Settings(
+        _env_file=None,
         database_path=tmp_path / "test.db",
         universe_path=universe,
         costs_path=costs,
@@ -99,3 +100,15 @@ def test_payload_and_auth_guards(tmp_path) -> None:
             content=b"{}",
         )
         assert response.status_code == 413
+
+
+def test_candidate_action_requires_gpt_bearer(tmp_path) -> None:
+    app = create_app(_settings(tmp_path), start_scheduler=False)
+    with TestClient(app) as client:
+        assert client.get("/v1/gpt-actions/candidates?market=KR").status_code == 401
+        response = client.get(
+            "/v1/gpt-actions/candidates?market=KR",
+            headers={"Authorization": "Bearer gpt-secret-1234567890123456"},
+        )
+        assert response.status_code == 200
+        assert response.json()["market"] == "KR"

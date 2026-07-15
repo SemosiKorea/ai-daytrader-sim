@@ -21,6 +21,7 @@ class PlanStatus(StrEnum):
     EXPIRED = "EXPIRED"
     REJECTED = "REJECTED"
     CANCELLED = "CANCELLED"
+    RISK_BLOCKED = "RISK_BLOCKED"
 
 
 class OrderState(StrEnum):
@@ -41,6 +42,14 @@ class OrderState(StrEnum):
 
 PRICE_INDICATORS = {"last", "bid", "ask", "spread_pct"}
 ALLOWED_INDICATORS = PRICE_INDICATORS | {
+    "regular_open_price",
+    "premarket_open",
+    "premarket_high",
+    "premarket_low",
+    "premarket_last",
+    "premarket_vwap",
+    "premarket_volume",
+    "premarket_gap_pct",
     "previous_open",
     "previous_high",
     "previous_low",
@@ -180,6 +189,17 @@ class PullbackRebreakSpec(BaseModel):
         return self
 
 
+class PremarketGuardSpec(BaseModel):
+    """Approval-time guardrails rechecked with regular-session data."""
+
+    reference_price: float = Field(gt=0)
+    max_open_deviation_pct: float = Field(default=1.0, gt=0, le=10)
+    max_spread_pct: float = Field(default=0.15, gt=0, le=2)
+    relative_volume_min: float = Field(default=1.3, gt=0, le=10)
+    require_above_vwap: bool = True
+    require_market_above_vwap: bool = True
+
+
 class CandidatePlan(BaseModel):
     symbol: str = Field(min_length=1, max_length=16)
     exchange: str = Field(min_length=2, max_length=16)
@@ -190,6 +210,7 @@ class CandidatePlan(BaseModel):
     take_profit: list[TakeProfitSpec] = Field(min_length=1, max_length=3)
     exit_policy: ExitPolicy = Field(default_factory=ExitPolicy)
     pullback_rebreak: PullbackRebreakSpec | None = None
+    premarket_guard: PremarketGuardSpec | None = None
     force_exit_time: time
 
     @model_validator(mode="after")

@@ -184,6 +184,9 @@ class RawQuote:
     ask: float
     bid_size: int
     ask_size: int
+    indicative_price: float = 0.0
+    indicative_volume: int = 0
+    indicative_change_rate: float = 0.0
     reference: bool = False
 
 
@@ -195,6 +198,7 @@ class RawTrade:
     last: float
     size: int
     cumulative_volume: int
+    previous_close: float = 0.0
     halted: bool = False
     reference: bool = False
 
@@ -208,6 +212,15 @@ def _number(value: str, default: float = 0.0) -> float:
 
 def _integer(value: str, default: int = 0) -> int:
     return int(_number(value, default))
+
+
+def _previous_close(last: float, difference: float, sign: str) -> float:
+    difference = abs(difference)
+    if sign in {"1", "2"}:
+        return max(0.0, last - difference)
+    if sign in {"4", "5"}:
+        return last + difference
+    return last if last > 0 else 0.0
 
 
 def _timestamp(day: str, clock: str, timezone: ZoneInfo, now: datetime) -> datetime:
@@ -328,6 +341,11 @@ class KISFrameDecoder:
                         ask=_number(record["ASKP1"]),
                         bid_size=_integer(record["BIDP_RSQN1"]),
                         ask_size=_integer(record["ASKP_RSQN1"]),
+                        indicative_price=_number(record.get("ANTC_CNPR", "0")),
+                        indicative_volume=_integer(record.get("ANTC_VOL", "0")),
+                        indicative_change_rate=_number(
+                            record.get("ANTC_CNTG_PRDY_CTRT", "0")
+                        ),
                         reference=subscription.reference,
                     )
                 )
@@ -343,6 +361,11 @@ class KISFrameDecoder:
                         last=_number(record["STCK_PRPR"]),
                         size=_integer(record["CNTG_VOL"]),
                         cumulative_volume=_integer(record["ACML_VOL"]),
+                        previous_close=_previous_close(
+                            _number(record["STCK_PRPR"]),
+                            _number(record.get("PRDY_VRSS", "0")),
+                            record.get("PRDY_VRSS_SIGN", "3"),
+                        ),
                         halted=record.get("TRHT_YN", "N") == "Y",
                         reference=subscription.reference,
                     )
@@ -371,6 +394,11 @@ class KISFrameDecoder:
                         last=_number(record["LAST"]),
                         size=_integer(record["EVOL"]),
                         cumulative_volume=_integer(record["TVOL"]),
+                        previous_close=_previous_close(
+                            _number(record["LAST"]),
+                            _number(record.get("DIFF", "0")),
+                            record.get("SIGN", "3"),
+                        ),
                         reference=subscription.reference,
                     )
                 )

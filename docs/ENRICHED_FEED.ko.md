@@ -34,6 +34,9 @@ FEED_US_QUOTE_SCOPE=venue
 FEED_OVERSEAS_TR_KEY_PREFIX=D
 FEED_REFERENCE_KR=069500:KRX
 FEED_REFERENCE_US=QQQ:NASDAQ
+FEED_SCAN_PREMARKET_MINUTES_KR=30
+FEED_SCAN_PREMARKET_MINUTES_US=60
+FEED_SCAN_REGULAR_MINUTES=120
 ```
 
 해외 실시간 시세의 모의 환경 지원 범위는 KIS 상품별로 다를 수 있습니다.
@@ -57,15 +60,22 @@ uv run daytrader-sim
 uv run daytrader-feed
 ```
 
-피드는 SQLite에서 당일 `ARMED` 또는 `RUNNING` 계획을 5초마다 확인합니다.
-대상 종목이 바뀌면 WebSocket을 재연결하고 새 종목의 체결·호가를 구독합니다.
-시장 기준 종목도 함께 구독해 `market_above_vwap_regular`을 계산합니다.
+피드는 승인된 계획의 종목을 항상 구독합니다. 이와 별도로 한국 정규장 30분 전,
+미국 정규장 60분 전부터 `config/universe.yaml`의 해당 시장 전체 종목을 승인 전에
+구독하고, 개장 후 기본 120분까지 후보 확인용 데이터를 수집합니다. 두 시장을
+시간대별로 나눠 구독해 KIS WebSocket의 연결당 40개 구독 한도를 넘지 않습니다.
+대상 종목이 바뀌면 WebSocket을 재연결하며 시장 기준 종목도 함께 구독해
+`market_above_vwap_regular`을 계산합니다.
 
 ## 계산 및 저장
 
 체결 데이터로 정규장 1분봉과 정확한 거래대금 합계를 구성합니다. 완성된 봉은
 `FEED_HISTORY_PATH`의 SQLite에 저장됩니다. 재시작하면 저장된 봉으로 EMA, RSI,
 ATR, 최근 5봉, 전일 OHLC를 복구합니다.
+
+장전 체결은 `premarket_open/high/low/last/vwap/volume/gap_pct`로 별도 저장하고
+정규장 EMA·RSI·ATR·VWAP 계산에는 넣지 않습니다. API는 장전과 정규장 최신
+스냅샷을 SQLite의 서로 다른 세션 행에 보존합니다.
 
 당일 데이터로 다음을 계산합니다.
 

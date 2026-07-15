@@ -9,7 +9,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
-from .models import Market, PlanStatus, TradePlan
+from .models import Market, MarketTick, PlanStatus, TradePlan
 
 
 class PlanConflictError(ValueError):
@@ -95,6 +95,27 @@ class Repository:
                     status TEXT NOT NULL,
                     payload TEXT NOT NULL,
                     created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS market_snapshots (
+                    market TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    session TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (market, symbol, trade_date, session)
+                );
+                CREATE INDEX IF NOT EXISTS idx_market_snapshots_lookup
+                    ON market_snapshots(market, trade_date, session, updated_at);
+                CREATE TABLE IF NOT EXISTS candidate_guard_states (
+                    plan_id TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    market TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (plan_id, symbol)
                 );
                 """
             )
@@ -301,6 +322,88 @@ class Repository:
                     datetime.now(UTC).isoformat(),
                 ),
             )
+
+    def save_market_snapshot(self, tick: MarketTick, trade_date: date) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self._lock, self._connect() as db:
+            db.execute(
+                """INSERT INTO market_snapshots(
+                       market, symbol, trade_date, session, payload, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(market, symbol, trade_date, session) DO UPDATE SET
+                     payload=excluded.payload, updated_at=excluded.updated_at""",
+                (
+                    tick.market.value,
+                    tick.symbol.upper(),
+                    trade_date.isoformat(),
+                    tick.session,
+                    tick.model_dump_json(),
+                    now,
+                ),
+            )
+
+    def market_snapshots(
+        self, market: Market, trade_date: date, session: str
+    ) -> list[MarketTick]:
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT payload FROM market_snapshots
+                   WHERE market=? AND trade_date=? AND session=? ORDER BY updated_at DESC""",
+                (market.value, trade_date.isoformat(), session),
+            ).fetchall()
+        return [MarketTick.model_validate_json(row["payload"]) for row in rows]
+
+    def block_candidate(
+        self,
+        plan_id: str,
+        symbol: str,
+        market: Market,
+        reason: str,
+        payload: dict[str, Any],
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self._lock, self._connect() as db:
+            db.execute(
+                """INSERT INTO candidate_guard_states(
+                       plan_id, symbol, market, status, reason, payload, updated_at
+                   ) VALUES (?, ?, ?, 'RISK_BLOCKED', ?, ?, ?)
+                   ON CONFLICT(plan_id, symbol) DO UPDATE SET
+                     status='RISK_BLOCKED', reason=excluded.reason,
+                     payload=excluded.payload, updated_at=excluded.updated_at""",
+                (
+                    plan_id,
+                    symbol.upper(),
+                    market.value,
+                    reason,
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                    now,
+                ),
+            )
+
+    def candidate_guard_state(self, plan_id: str, symbol: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM candidate_guard_states WHERE plan_id=? AND symbol=?",
+                (plan_id, symbol.upper()),
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["payload"] = json.loads(result["payload"])
+        return result
+
+    def candidate_guard_states(self, plan_id: str) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM candidate_guard_states WHERE plan_id=? ORDER BY symbol",
+                (plan_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item["payload"])
+            result.append(item)
+        return result
 
     def recent_events(self, limit: int = 100) -> list[dict[str, Any]]:
         with self._connect() as db:
