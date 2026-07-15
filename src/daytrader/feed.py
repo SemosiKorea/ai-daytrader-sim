@@ -153,13 +153,23 @@ class EnrichedFeedBridge:
                             exchange=candidate.exchange.upper(),
                         )
                     )
+            experiments = self.repository.active_portfolio_experiments(market, local_date)
+            for experiment in experiments:
+                for candidate in experiment.candidates:
+                    symbols.add(
+                        FeedSymbol(
+                            market=market,
+                            symbol=candidate.symbol.upper(),
+                            exchange=candidate.exchange.upper(),
+                        )
+                    )
             scanning = self._scan_market(market, now)
             if scanning:
                 for symbol, metadata in self.universe.get(market.value, {}).items():
                     symbols.add(
                         FeedSymbol(market, symbol.upper(), metadata["exchange"].upper())
                     )
-            if (plans or scanning) and self.references[market] is not None:
+            if (plans or experiments or scanning) and self.references[market] is not None:
                 symbols.add(self.references[market])
         return symbols
 

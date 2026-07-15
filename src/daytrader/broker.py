@@ -119,10 +119,20 @@ class PaperBroker:
         repository: Repository,
         costs: dict[str, CostConfig],
         order_intent_recorder: OrderIntentRecorder | None = None,
+        *,
+        max_concurrent_positions: int = 1,
+        fixed_quantities: dict[tuple[Market, str], int] | None = None,
+        enforce_portfolio_gates: bool = True,
     ):
         self.repository = repository
         self.costs = costs
         self.order_intent_recorder = order_intent_recorder
+        self.max_concurrent_positions = max(1, max_concurrent_positions)
+        self.fixed_quantities = {
+            (market, symbol.upper()): quantity
+            for (market, symbol), quantity in (fixed_quantities or {}).items()
+        }
+        self.enforce_portfolio_gates = enforce_portfolio_gates
         self.portfolios = {
             Market(market): Portfolio(Market(market), cost.initial_cash, cost.initial_cash)
             for market, cost in costs.items()
@@ -362,18 +372,19 @@ class PaperBroker:
         self._ensure_session(market, timestamp)
         portfolio = self.portfolios[market]
         cost = self.costs[market.value]
-        if portfolio.positions or portfolio.pending_orders:
+        occupied = set(portfolio.positions) | set(portfolio.pending_orders)
+        if len(occupied) >= self.max_concurrent_positions:
             return False, "POSITION_SLOT_OCCUPIED"
         if portfolio.trades_today >= cost.max_filled_entries_per_day:
             return False, "DAILY_ENTRY_LIMIT"
         if portfolio.order_submissions_today >= cost.max_order_submissions_per_day:
             return False, "DAILY_ORDER_LIMIT"
-        if portfolio.consecutive_stops >= cost.consecutive_stop_limit:
+        if self.enforce_portfolio_gates and portfolio.consecutive_stops >= cost.consecutive_stop_limit:
             return False, "CONSECUTIVE_STOP_LIMIT"
-        if portfolio.cooldown_until and timestamp < portfolio.cooldown_until:
+        if self.enforce_portfolio_gates and portfolio.cooldown_until and timestamp < portfolio.cooldown_until:
             return False, "STOP_COOLDOWN"
         limit = portfolio.initial_cash * cost.daily_loss_limit_pct / 100
-        if self.daily_risk_used(market) >= limit:
+        if self.enforce_portfolio_gates and self.daily_risk_used(market) >= limit:
             return False, "DAILY_RISK_LIMIT"
         return True, None
 
@@ -400,7 +411,12 @@ class PaperBroker:
         cash_quantity = math.floor(
             portfolio.cash / self._entry_unit_cost_at_limit(market, candidate.entry.limit_price)
         )
-        quantity = min(risk_quantity, cash_quantity, policy.max_position_quantity)
+        fixed_quantity = self.fixed_quantities.get((market, candidate.symbol.upper()))
+        quantity = min(
+            fixed_quantity if fixed_quantity is not None else risk_quantity,
+            cash_quantity,
+            policy.max_position_quantity,
+        )
         if quantity <= 0:
             return None, "RISK_BLOCKED"
         if not self.repository.claim_idempotency_key(key, market, candidate.symbol, plan_id):

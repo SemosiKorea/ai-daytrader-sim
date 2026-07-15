@@ -13,6 +13,12 @@ class Market(StrEnum):
     US = "US"
 
 
+class ExperimentCohort(StrEnum):
+    GPT_ALL_EQUAL = "GPT_ALL_EQUAL"
+    USER_FIXED_SLEEVE = "USER_FIXED_SLEEVE"
+    USER_REALLOCATED = "USER_REALLOCATED"
+
+
 class PlanStatus(StrEnum):
     VALIDATED = "VALIDATED"
     ARMED = "ARMED"
@@ -342,3 +348,36 @@ class PortfolioView(BaseModel):
     equity: float
     realized_pnl: float
     positions: list[dict[str, Any]]
+
+
+class PortfolioExperimentRequest(BaseModel):
+    experiment_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,48}$")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    market: Market
+    trade_date: date
+    expires_at: datetime
+    approval_nonce: str = Field(pattern=r"^\d{6}$")
+    candidates: list[CandidatePlan] = Field(min_length=1, max_length=3)
+    user_selected_symbols: list[str] = Field(min_length=1, max_length=3)
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "PortfolioExperimentRequest":
+        if self.created_at.tzinfo is None or self.expires_at.tzinfo is None:
+            raise ValueError("experiment timestamps must include a timezone")
+        symbols = [candidate.symbol.upper() for candidate in self.candidates]
+        if len(set(symbols)) != len(symbols):
+            raise ValueError("experiment candidates cannot contain duplicate symbols")
+        selected = [symbol.upper() for symbol in self.user_selected_symbols]
+        if len(set(selected)) != len(selected):
+            raise ValueError("user selection cannot contain duplicate symbols")
+        if not set(selected).issubset(symbols):
+            raise ValueError("user selection must be a subset of GPT candidates")
+        self.user_selected_symbols = selected
+        return self
+
+
+class PortfolioExperimentReceipt(BaseModel):
+    experiment_id: str
+    status: Literal["ACTIVE"]
+    cohorts: list[ExperimentCohort]
+    message: str

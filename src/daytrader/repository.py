@@ -9,7 +9,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
-from .models import Market, MarketTick, PlanStatus, TradePlan
+from .models import Market, MarketTick, PlanStatus, PortfolioExperimentRequest, TradePlan
 
 
 class PlanConflictError(ValueError):
@@ -117,6 +117,17 @@ class Repository:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (plan_id, symbol)
                 );
+                CREATE TABLE IF NOT EXISTS portfolio_experiments (
+                    experiment_id TEXT PRIMARY KEY,
+                    market TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_portfolio_experiments_active
+                    ON portfolio_experiments(market, trade_date, status);
                 """
             )
 
@@ -157,6 +168,86 @@ class Repository:
                 (now.isoformat(), market.value, trade_date.isoformat()),
             )
             return db.total_changes == 1
+
+    def approve_portfolio_experiment(self, request: PortfolioExperimentRequest) -> bool:
+        """Consume the OTP and persist an isolated paper experiment atomically."""
+        payload = request.model_copy(update={"approval_nonce": "000000"}).model_dump_json()
+        now = datetime.now(UTC)
+        with self._lock, self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM nonces WHERE market=? AND trade_date=?",
+                (request.market.value, request.trade_date.isoformat()),
+            ).fetchone()
+            if (
+                not row
+                or row["used_at"]
+                or row["nonce_hash"] != self._hash(request.approval_nonce)
+                or datetime.fromisoformat(row["expires_at"]) < now
+            ):
+                return False
+            db.execute(
+                """INSERT INTO portfolio_experiments(
+                       experiment_id, market, trade_date, status, payload,
+                       created_at, updated_at
+                   ) VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?)""",
+                (
+                    request.experiment_id,
+                    request.market.value,
+                    request.trade_date.isoformat(),
+                    payload,
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+            db.execute(
+                "UPDATE nonces SET used_at=? WHERE market=? AND trade_date=? AND used_at IS NULL",
+                (now.isoformat(), request.market.value, request.trade_date.isoformat()),
+            )
+        self.add_event(
+            "PORTFOLIO_EXPERIMENT_CREATED",
+            request.market,
+            None,
+            None,
+            {
+                "experiment_id": request.experiment_id,
+                "candidate_symbols": [item.symbol for item in request.candidates],
+                "user_selected_symbols": request.user_selected_symbols,
+            },
+        )
+        return True
+
+    def get_portfolio_experiment(self, experiment_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM portfolio_experiments WHERE experiment_id=?",
+                (experiment_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def active_portfolio_experiments(
+        self, market: Market | None = None, trade_date: date | None = None
+    ) -> list[PortfolioExperimentRequest]:
+        clauses = ["status='ACTIVE'"]
+        values: list[str] = []
+        if market is not None:
+            clauses.append("market=?")
+            values.append(market.value)
+        if trade_date is not None:
+            clauses.append("trade_date=?")
+            values.append(trade_date.isoformat())
+        with self._connect() as db:
+            rows = db.execute(
+                f"SELECT payload FROM portfolio_experiments WHERE {' AND '.join(clauses)}",
+                values,
+            ).fetchall()
+        return [PortfolioExperimentRequest.model_validate_json(row["payload"]) for row in rows]
+
+    def set_portfolio_experiment_status(self, experiment_id: str, status: str) -> None:
+        with self._lock, self._connect() as db:
+            db.execute(
+                "UPDATE portfolio_experiments SET status=?, updated_at=? WHERE experiment_id=?",
+                (status, datetime.now(UTC).isoformat(), experiment_id),
+            )
 
     def store_plan(self, plan: TradePlan, status: PlanStatus) -> str:
         payload = plan.model_copy(update={"approval_nonce": "000000"}).model_dump_json()

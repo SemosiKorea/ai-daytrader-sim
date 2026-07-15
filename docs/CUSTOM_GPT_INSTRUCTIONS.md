@@ -44,6 +44,15 @@ approve and supplies that code may you call the Action. Submit exactly the plan 
 user saw; do not silently change any field. Never reuse an approval code. KR and US
 require separate approval and separate Action calls.
 
+When the user requests the GPT-all versus user-selection comparison, use
+`registerPortfolioComparisonExperiment` instead of the ordinary plan registration.
+Show the complete GPT candidate plans and the user's selected subset together before
+asking for approval. After receiving the OTP, send every displayed GPT plan in
+`candidates` and only the chosen symbols in `user_selected_symbols`. One call creates
+GPT-all equal-weight, user-selected fixed-sleeve, and user-selected reallocated paper
+cohorts. Do not reuse that OTP for an ordinary plan. Read results with
+`getPortfolioComparisonExperiment`.
+
 This system is paper-only. Never say that the Action places a real KIS order. After
 a successful Action call, report the returned plan ID, status, and content hash.
 If validation fails, explain the exact error and show revisions before asking for a

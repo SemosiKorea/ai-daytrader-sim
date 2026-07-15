@@ -22,6 +22,7 @@ def _settings(tmp_path) -> Settings:
     return Settings(
         _env_file=None,
         database_path=tmp_path / "test.db",
+        experiment_data_path=tmp_path / "experiments",
         universe_path=universe,
         costs_path=costs,
         gpt_action_bearer="gpt-secret-1234567890123456",
@@ -112,3 +113,50 @@ def test_candidate_action_requires_gpt_bearer(tmp_path) -> None:
         )
         assert response.status_code == 200
         assert response.json()["market"] == "KR"
+
+
+def test_portfolio_experiment_uses_one_time_approval_and_three_cohorts(
+    tmp_path, kr_plan_dict: dict
+) -> None:
+    app = create_app(_settings(tmp_path), start_scheduler=False)
+    with TestClient(app) as client:
+        nonce = client.post(
+            "/v1/admin/nonces",
+            headers={"Authorization": "Bearer admin-secret-12345678901234"},
+            json={"market": "KR", "trade_date": kr_plan_dict["trade_date"]},
+        ).json()["nonce"]
+        payload = {
+            "experiment_id": "KR_compare_001",
+            "created_at": kr_plan_dict.get("created_at"),
+            "market": "KR",
+            "trade_date": kr_plan_dict["trade_date"],
+            "expires_at": kr_plan_dict["expires_at"],
+            "approval_nonce": nonce,
+            "candidates": kr_plan_dict["approved_symbols"],
+            "user_selected_symbols": ["005930"],
+        }
+        payload.pop("created_at")
+        response = client.post(
+            "/v1/gpt-actions/experiments",
+            headers={"Authorization": "Bearer gpt-secret-1234567890123456"},
+            json=payload,
+        )
+        assert response.status_code == 201
+        assert set(response.json()["cohorts"]) == {
+            "GPT_ALL_EQUAL",
+            "USER_FIXED_SLEEVE",
+            "USER_REALLOCATED",
+        }
+        status = client.get(
+            "/v1/gpt-actions/experiments/KR_compare_001",
+            headers={"Authorization": "Bearer gpt-secret-1234567890123456"},
+        )
+        assert status.status_code == 200
+        assert len(status.json()["cohorts"]) == 3
+
+        reused = client.post(
+            "/v1/gpt-actions/experiments",
+            headers={"Authorization": "Bearer gpt-secret-1234567890123456"},
+            json={**payload, "experiment_id": "KR_compare_002"},
+        )
+        assert reused.status_code == 409

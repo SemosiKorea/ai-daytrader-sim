@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     app_host: str = "127.0.0.1"
     app_port: int = 8787
     database_path: Path = Path("data/daytrader.db")
+    experiment_data_path: Path = Path("data/experiments")
     gpt_action_bearer: str = "change-me"
     admin_bearer: str = "change-admin"
     market_data_bearer: str = "change-feed"

@@ -4,6 +4,8 @@
 
 눌림목 전략: [`docs/PULLBACK_STRATEGY.ko.md`](docs/PULLBACK_STRATEGY.ko.md)
 
+포트폴리오 비교실험: [`docs/PORTFOLIO_EXPERIMENT.ko.md`](docs/PORTFOLIO_EXPERIMENT.ko.md)
+
 KIS 주문 기록 게이트웨이: [`docs/KIS_ORDER_GATEWAY.ko.md`](docs/KIS_ORDER_GATEWAY.ko.md)
 
 다음 흐름을 위한 독립형 가상매매 전용 프로그램입니다.
@@ -220,6 +222,13 @@ API와 피드 템플릿은 `~/Library/LaunchAgents`에 설치하기 전에 모�
 버전·시각도 거절합니다. 기업행동이 감지되면 해당 계획을 자동 무효화합니다.
 
 ## 성과 평가
+
+GPT 전체 후보와 사용자 선택 효과를 분리하려면 승인코드로
+`POST /v1/gpt-actions/experiments`를 한 번 호출합니다. 프로그램은 기존 수동
+포트폴리오와 분리된 `GPT_ALL_EQUAL`, `USER_FIXED_SLEEVE`,
+`USER_REALLOCATED` 가상계좌를 생성하고 동일 Tick·체결 모델을 적용합니다.
+실험 결과는 `GET /v1/gpt-actions/experiments/{experiment_id}`에서 조회합니다.
+실험 계좌는 KIS 주문 의도 기록기를 사용하지 않습니다.
 
 `ADMIN_BEARER` 인증으로 `GET /v1/performance/KR` 또는
 `GET /v1/performance/US`를 호출합니다. 감사 로그에 저장된 청산 포지션을

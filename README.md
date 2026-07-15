@@ -8,6 +8,9 @@ Safety enhancement matrix (Korean):
 State-based pullback strategy (Korean):
 [`docs/PULLBACK_STRATEGY.ko.md`](docs/PULLBACK_STRATEGY.ko.md)
 
+Portfolio comparison experiment (Korean):
+[`docs/PORTFOLIO_EXPERIMENT.ko.md`](docs/PORTFOLIO_EXPERIMENT.ko.md)
+
 KIS record-only order gateway (Korean):
 [`docs/KIS_ORDER_GATEWAY.ko.md`](docs/KIS_ORDER_GATEWAY.ko.md)
 
@@ -220,6 +223,13 @@ opening ranges, non-session dates, invalid plan versions/timestamps, and corpora
 action invalidations.
 
 ## Evaluation
+
+To isolate GPT-wide performance, user filtering, and concentration effects, submit
+one OTP-approved request to `POST /v1/gpt-actions/experiments`. It creates isolated
+`GPT_ALL_EQUAL`, `USER_FIXED_SLEEVE`, and `USER_REALLOCATED` paper ledgers driven by
+the same ticks and fill model. Read the comparison from
+`GET /v1/gpt-actions/experiments/{experiment_id}`. Experiment ledgers never instantiate
+the KIS order-intent recorder.
 
 Use `GET /v1/performance/KR` and `/US` with `ADMIN_BEARER`. Metrics are computed from
 closed paper positions persisted in the audit log: trade count, net P&L, profit
