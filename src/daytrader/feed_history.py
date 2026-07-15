@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -61,8 +62,28 @@ class FeedHistoryStore:
         return connection
 
     def save(self, bar: MinuteBar) -> None:
+        self.save_many((bar,))
+
+    def save_many(self, bars: Iterable[MinuteBar]) -> int:
+        """Upsert bars in one transaction and return the number presented."""
+        rows = [
+            (
+                bar.market.value,
+                bar.symbol.upper(),
+                bar.start.isoformat(),
+                bar.open,
+                bar.high,
+                bar.low,
+                bar.close,
+                bar.volume,
+                bar.notional,
+            )
+            for bar in bars
+        ]
+        if not rows:
+            return 0
         with self._lock, self._connect() as db:
-            db.execute(
+            db.executemany(
                 """
                 INSERT INTO minute_bars(
                     market, symbol, start, open, high, low, close, volume, notional
@@ -75,18 +96,9 @@ class FeedHistoryStore:
                     volume=excluded.volume,
                     notional=excluded.notional
                 """,
-                (
-                    bar.market.value,
-                    bar.symbol.upper(),
-                    bar.start.isoformat(),
-                    bar.open,
-                    bar.high,
-                    bar.low,
-                    bar.close,
-                    bar.volume,
-                    bar.notional,
-                ),
+                rows,
             )
+        return len(rows)
 
     def load(self, market: Market, symbol: str, limit: int = 20_000) -> list[MinuteBar]:
         with self._connect() as db:

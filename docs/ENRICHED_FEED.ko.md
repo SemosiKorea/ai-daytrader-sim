@@ -94,7 +94,35 @@ ATR, 최근 5봉, 전일 OHLC를 복구합니다.
 - 최근 완성봉 거래량
 - 최근 20거래일 동일 경과시각 평균 대비 상대 거래량
 
-## 과거 분봉 가져오기
+## KIS에서 미국 20거래일 분봉 자동 적재
+
+KIS 공식 `해외주식분봉조회`(`HHDFS76950200`)를 읽기 전용으로 호출해
+`config/universe.yaml`의 미국 종목과 시장 기준 종목(QQQ)의 최근 완료된 정규장
+20세션을 가져올 수 있습니다. 장전·장후 봉은 저장하지 않으며, 조기폐장을 포함한
+공식 세션별 예상 1분봉이 모두 존재하는지 검사합니다.
+
+```bash
+uv run daytrader-feed --sync-kis-us-history --history-sessions 20
+```
+
+한 종목만 다시 확인하려면 다음처럼 실행합니다.
+
+```bash
+uv run daytrader-feed --sync-kis-us-history --history-sessions 20 \
+  --history-symbol NVDA
+```
+
+명령 결과의 모든 종목이 `ready: true`여야 20세션 준비가 완료된 것입니다. 일부
+분봉이 없으면 종료코드 2와 함께 `날짜:관측봉수/예상봉수`가 출력되고, 상대 거래량은
+계속 준비되지 않은 상태로 유지됩니다. KIS 공식 저장소의 레거시 예제는 이 API로
+약 1개월 분봉을 반복 조회할 수 있다고 설명합니다.
+
+참고 자료:
+
+- [KIS 공식 해외주식 분봉조회 예제](https://github.com/koreainvestment/open-trading-api/tree/main/examples_llm/overseas_stock/inquire_time_itemchartprice)
+- [KIS 공식 약 1개월 분봉 수집 예제](https://github.com/koreainvestment/open-trading-api/blob/main/legacy/rest/get_ovsstk_chart_price.py)
+
+## 공급자 CSV로 과거 분봉 가져오기
 
 KIS 국내 당일분봉 API는 전일 분봉을 제공하지 않으므로 20거래일 상대 거래량을
 즉시 준비하려면 신뢰할 수 있는 공급자에서 받은 정규장 1분봉을 가져와야 합니다.
@@ -119,8 +147,9 @@ US,NVDA,2026-07-14T09:30:00-04:00,170,171,169.9,170.8,120000,20450000
 
 ## 미국 호가 안전 경계
 
-KIS 공식 샘플은 미국 실시간 1호가를 제공한다고 설명하지만, 이 값이 여러 거래소를
-종합한 NBBO라고 명시하지 않습니다. 따라서 기본 설정은 다음과 같습니다.
+KIS 공식 샘플은 미국 실시간 1호가를 무료 제공한다고 설명하지만, 이 값이 여러
+거래소를 종합한 NBBO라고 명시하지 않습니다. 공식 자료 확인 결과도 동일하므로
+현재 KIS 피드는 검증된 통합호가로 승격하지 않고 다음 값을 유지합니다.
 
 ```dotenv
 FEED_US_QUOTE_SCOPE=venue
@@ -140,7 +169,8 @@ FEED_US_QUOTE_SCOPE=consolidated
 - KIS 해외 실시간 레코드에는 완전한 LULD·거래중단·기업행동 상태가 없습니다.
 - 브리지는 국내 `TRHT_YN` 거래정지 표시는 반영하지만 별도 상태 공급자를 대체하지
   않습니다.
-- 프로그램 시작 전에 발생한 당일 체결은 자동 복원하지 않습니다.
+- 프로그램 시작 전에 발생한 미국 당일 정규장 분봉은 위 KIS 동기화 명령으로
+  복원할 수 있습니다.
 - 20거래일 분봉이 없으면 상대 거래량이 필요한 눌림목 계획은 진입하지 않습니다.
 - 이 피드는 가상매매 입력 전용이며 실제 주문 기능을 추가하지 않습니다.
 

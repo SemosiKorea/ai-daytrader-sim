@@ -124,8 +124,15 @@ curl -X POST http://127.0.0.1:8787/v1/market-data/ticks \
 ```
 
 완성된 1분봉은 `data/feed_history.db`에 보존됩니다. 정확한 20거래일 동시간
-상대 거래량은 과거 20세션이 누적되거나 `daytrader-feed --import-history`로
-검증된 분봉을 가져오기 전까지 `ready=false`입니다.
+상대 거래량은 과거 20세션이 누적되거나 아래 명령으로 KIS 미국 정규장 분봉을
+가져오기 전까지 `ready=false`입니다.
+
+```bash
+uv run daytrader-feed --sync-kis-us-history --history-sessions 20
+```
+
+별도 공급자 CSV는 `daytrader-feed --import-history verified-bars.csv`로 가져올 수
+있습니다. 동기화 결과의 모든 종목이 `ready: true`인지 확인해야 합니다.
 
 KIS 해외 WebSocket은 미국 실시간 1호가를 제공하지만 공식 샘플만으로 NBBO임을
 확정할 수 없습니다. 따라서 `FEED_US_QUOTE_SCOPE` 기본값은 `venue`이고, 이 상태에서는

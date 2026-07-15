@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -23,6 +24,8 @@ from .kis_websocket import (
     RawTrade,
     build_subscriptions,
 )
+from .kis_history import KISUSMinuteHistorySync
+from .kis_readonly import KISReadOnlyClient
 from .market_clock import MARKET_TZ, force_exit_at, is_session, session_bounds
 from .models import Market, MarketTick
 from .repository import Repository
@@ -489,14 +492,93 @@ def run() -> None:
         type=Path,
         help="import verified one-minute bars from CSV and exit",
     )
+    parser.add_argument(
+        "--sync-kis-us-history",
+        action="store_true",
+        help="read and store official KIS US regular-session one-minute history",
+    )
+    parser.add_argument(
+        "--history-sessions",
+        type=int,
+        default=20,
+        help="number of completed US sessions to synchronize (default: 20)",
+    )
+    parser.add_argument(
+        "--history-symbol",
+        action="append",
+        default=[],
+        help="limit KIS history sync to a symbol; may be repeated",
+    )
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     settings = EnrichedFeedSettings()
+    if args.import_history and args.sync_kis_us_history:
+        parser.error("--import-history and --sync-kis-us-history are mutually exclusive")
     if args.import_history:
         imported = FeedHistoryStore(settings.feed_history_path).import_csv(args.import_history)
         logger.info("imported %d historical minute bars", imported)
+        return
+    if args.sync_kis_us_history:
+        if args.history_sessions < 1 or args.history_sessions > 22:
+            parser.error("--history-sessions must be between 1 and 22")
+        if not settings.kis_app_key or not settings.kis_app_secret:
+            parser.error("KIS_APP_KEY and KIS_APP_SECRET are required")
+        requested = {symbol.upper() for symbol in args.history_symbol}
+        symbols = dict(load_universe(settings.universe_path).get("US", {}))
+        reference = _reference(settings.feed_reference_us, Market.US)
+        if reference is not None:
+            symbols.setdefault(reference.symbol, {"exchange": reference.exchange})
+        if requested:
+            unknown = requested - set(symbols)
+            if unknown:
+                parser.error(f"unknown US history symbols: {sorted(unknown)}")
+            symbols = {symbol: symbols[symbol] for symbol in sorted(requested)}
+
+        async def synchronize() -> list[dict[str, object]]:
+            client = KISReadOnlyClient(
+                settings.kis_app_key or "",
+                settings.kis_app_secret or "",
+                settings.kis_env,
+            )
+            try:
+                await client.authenticate()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 403:
+                    raise
+                logger.warning(
+                    "KIS rejected rapid access-token reissuance; retrying once in 65 seconds"
+                )
+                await asyncio.sleep(65)
+                await client.authenticate()
+            sync = KISUSMinuteHistorySync(
+                client,
+                FeedHistoryStore(settings.feed_history_path),
+            )
+            results = []
+            for symbol, metadata in symbols.items():
+                result = await sync.sync_symbol(
+                    symbol,
+                    metadata["exchange"],
+                    sessions=args.history_sessions,
+                )
+                results.append(
+                    {
+                        "symbol": result.symbol,
+                        "requested_sessions": result.requested_sessions,
+                        "complete_sessions": result.complete_sessions,
+                        "saved_bars": result.saved_bars,
+                        "incomplete_sessions": result.incomplete_sessions,
+                        "ready": result.ready,
+                    }
+                )
+            return results
+
+        results = asyncio.run(synchronize())
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+        if not all(bool(result["ready"]) for result in results):
+            raise SystemExit(2)
         return
     asyncio.run(EnrichedFeedBridge(settings).run())
