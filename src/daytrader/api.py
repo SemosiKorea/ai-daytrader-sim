@@ -5,12 +5,13 @@ import html
 import sqlite3
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Header, HTTPException, Request, status
+from fastapi import FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from .broker import PaperBroker
 from .config import Settings, load_costs, load_universe
 from .engine import TradingEngine
+from .kis_orders import KISOrderIntentRecorder
 from .kis_readonly import KISQuotePoller, KISReadOnlyClient
 from .models import (
     Market,
@@ -43,7 +44,12 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     repository = Repository(settings.database_path)
     universe = load_universe(settings.universe_path)
     costs = load_costs(settings.costs_path)
-    broker = PaperBroker(repository, costs)
+    order_intent_recorder = KISOrderIntentRecorder(
+        repository,
+        account_configured=bool(settings.kis_account_number),
+        product_code=settings.kis_product_code,
+    )
+    broker = PaperBroker(repository, costs, order_intent_recorder)
     engine = TradingEngine(repository, broker)
     notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
     session_scheduler = SessionScheduler(repository, engine, broker, notifier)
@@ -72,8 +78,8 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
 
     app = FastAPI(
         title="AI Day Trader Simulator",
-        version="0.4.0",
-        description="GPT-approved paper trading only. No live order endpoint exists.",
+        version="0.5.0",
+        description="GPT-approved paper trading with record-only KIS order intents.",
         lifespan=lifespan,
     )
     app.state.settings = settings
@@ -81,6 +87,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     app.state.universe = universe
     app.state.costs = costs
     app.state.broker = broker
+    app.state.order_intent_recorder = order_intent_recorder
     app.state.engine = engine
     app.state.notifier = notifier
     app.state.scheduler = session_scheduler
@@ -97,7 +104,12 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
 
     @app.get("/healthz")
     async def healthz() -> dict:
-        return {"status": "ok", "mode": "paper-only", "live_orders": False}
+        return {
+            "status": "ok",
+            "mode": "paper-only",
+            "kis_order_mode": settings.kis_order_mode,
+            "live_orders": False,
+        }
 
     @app.post("/v1/admin/nonces", response_model=NonceResponse)
     async def issue_nonce(
@@ -216,6 +228,14 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
         _require(settings.admin_bearer, authorization)
         return broker.performance(market)
 
+    @app.get("/v1/admin/kis-order-intents")
+    async def kis_order_intents(
+        limit: int = Query(default=100, ge=1, le=500),
+        authorization: str | None = Header(default=None),
+    ) -> list[dict]:
+        _require(settings.admin_bearer, authorization)
+        return repository.recent_kis_order_intents(limit)
+
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(authorization: str | None = Header(default=None)) -> str:
         _require(settings.admin_bearer, authorization)
@@ -233,7 +253,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
         <style>body{{font-family:system-ui;margin:2rem;max-width:1200px}}
         table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ddd;padding:.5rem}}
         code{{white-space:pre-wrap}}</style>
-        <h1>AI Day Trader Simulator</h1><p>Mode: <b>paper-only</b></p>
+        <h1>AI Day Trader Simulator</h1><p>Mode: <b>paper-only / KIS record-only</b></p>
         <h2>Recent events</h2><table><tr><th>Time</th><th>Event</th><th>Market</th>
         <th>Symbol</th><th>Payload</th></tr>{rows}</table></html>"""
 

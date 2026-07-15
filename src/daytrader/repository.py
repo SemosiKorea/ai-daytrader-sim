@@ -84,6 +84,18 @@ class Repository:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (plan_id, symbol)
                 );
+                CREATE TABLE IF NOT EXISTS kis_order_intents (
+                    intent_id TEXT PRIMARY KEY,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    market TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    plan_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    side TEXT,
+                    status TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 """
             )
 
@@ -296,6 +308,55 @@ class Repository:
                 "SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def record_kis_order_intent(
+        self,
+        *,
+        intent_id: str,
+        idempotency_key: str,
+        market: Market,
+        symbol: str,
+        plan_id: str,
+        action: str,
+        side: str | None,
+        status: str,
+        payload: dict[str, Any],
+    ) -> bool:
+        """Persist a sanitized KIS order intent exactly once.
+
+        Account numbers, app keys, tokens, and secrets must never be included in payload.
+        """
+        try:
+            with self._lock, self._connect() as db:
+                db.execute(
+                    """INSERT INTO kis_order_intents(
+                           intent_id, idempotency_key, market, symbol, plan_id,
+                           action, side, status, payload, created_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        intent_id,
+                        idempotency_key,
+                        market.value,
+                        symbol.upper(),
+                        plan_id,
+                        action,
+                        side,
+                        status,
+                        json.dumps(payload, ensure_ascii=False, default=str),
+                        datetime.now(UTC).isoformat(),
+                    ),
+                )
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def recent_kis_order_intents(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM kis_order_intents ORDER BY rowid DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [{**dict(row), "payload": json.loads(row["payload"])} for row in rows]
 
     def plan_events(self, plan_id: str, limit: int = 20) -> list[dict[str, Any]]:
         with self._connect() as db:

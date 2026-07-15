@@ -82,7 +82,17 @@ def test_approval_code_is_one_time_and_dashboard_is_private(tmp_path, kr_plan_di
 def test_payload_and_auth_guards(tmp_path) -> None:
     app = create_app(_settings(tmp_path), start_scheduler=False)
     with TestClient(app) as client:
+        health = client.get("/healthz")
+        assert health.json()["kis_order_mode"] == "record_only"
+        assert health.json()["live_orders"] is False
         assert client.get("/v1/performance/KR").status_code == 401
+        assert client.get("/v1/admin/kis-order-intents").status_code == 401
+        intents = client.get(
+            "/v1/admin/kis-order-intents",
+            headers={"Authorization": "Bearer admin-secret-12345678901234"},
+        )
+        assert intents.status_code == 200
+        assert intents.json() == []
         response = client.post(
             "/v1/market-data/ticks",
             headers={"Content-Length": "65537"},

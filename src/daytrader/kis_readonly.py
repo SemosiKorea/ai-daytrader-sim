@@ -137,7 +137,9 @@ class KISReadOnlyClient:
         )
 
     async def place_order(self, *_: Any, **__: Any) -> None:
-        raise LiveOrderCapabilityDisabled("live KIS orders are not implemented in v1")
+        raise LiveOrderCapabilityDisabled(
+            "KISReadOnlyClient cannot place orders; service mode is record_only"
+        )
 
 
 class KISQuotePoller:

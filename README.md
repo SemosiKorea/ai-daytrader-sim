@@ -8,6 +8,9 @@ Safety enhancement matrix (Korean):
 State-based pullback strategy (Korean):
 [`docs/PULLBACK_STRATEGY.ko.md`](docs/PULLBACK_STRATEGY.ko.md)
 
+KIS record-only order gateway (Korean):
+[`docs/KIS_ORDER_GATEWAY.ko.md`](docs/KIS_ORDER_GATEWAY.ko.md)
+
 An independent, paper-only program for this workflow:
 
 1. A Custom GPT proposes one KR or US AI/semiconductor intraday plan.
@@ -16,6 +19,7 @@ An independent, paper-only program for this workflow:
 4. Deterministic validation arms the plan for that market date only.
 5. Read-only KIS quotes or an authenticated enriched feed drive simulated fills.
 6. Stops, targets, risk limits, and forced close are executed by code, not by an LLM.
+7. Order decisions are converted to KIS request contracts and stored locally only.
 
 No OpenAI API key is used by this project. The Custom GPT runs in ChatGPT and calls
 the HTTPS Action after approval. ChatGPT/GPT availability is governed by the user's
@@ -23,10 +27,15 @@ ChatGPT plan. This software does not provide investment advice or guarantee resu
 
 ## Safety boundary
 
-- `PaperBroker` is the only execution adapter.
+- `PaperBroker` is the only active execution adapter.
 - `KISReadOnlyClient` allowlists quotation GET paths and OAuth token creation.
 - `place_order()` always raises `LiveOrderCapabilityDisabled`.
-- There are no KIS order, account, balance, hash-key, or websocket order-notice calls.
+- KIS KR/US cash-equity limit/cancel request builders and OAuth/hash/HTTP transport
+  contracts exist, but the service never instantiates the transport.
+- Runtime configuration accepts only `KIS_ORDER_MODE=record_only`; production dispatch
+  is also source-code blocked, so changing `.env` cannot enable live orders.
+- Account reconciliation and execution notices are not implemented, so this is not
+  ready for live trading.
 - KR and US require distinct, single-use, 45-minute approval codes.
 - One plan per market/date, maximum three candidates, and one reserved market slot
   shared by pending entry orders and open positions.
@@ -70,6 +79,13 @@ The event dashboard is protected with `ADMIN_BEARER`:
 
 ```bash
 curl -H "Authorization: Bearer $ADMIN_BEARER" http://127.0.0.1:8787/
+```
+
+Inspect locally recorded KIS order intents through the admin-only endpoint:
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_BEARER" \
+  http://127.0.0.1:8787/v1/admin/kis-order-intents
 ```
 
 ## Market data modes
@@ -206,4 +222,5 @@ uv run pytest
 ```
 
 The tests cover schema/risk rejection, one-time approval, rule crossing, simulated
-fills, restart persistence, stale ticks, and the hard KIS order prohibition.
+fills, restart persistence, stale ticks, official KIS order request construction,
+and pre-network production-order blocking.
