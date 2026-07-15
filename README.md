@@ -76,10 +76,20 @@ curl -H "Authorization: Bearer $ADMIN_BEARER" http://127.0.0.1:8787/
 
 The normative feed and indicator definitions are documented in
 [`docs/INDICATOR_CONTRACT.ko.md`](docs/INDICATOR_CONTRACT.ko.md).
+Setup and operational limitations of the included KIS WebSocket bridge are in
+[`docs/ENRICHED_FEED.ko.md`](docs/ENRICHED_FEED.ko.md).
 
-The default is authenticated push mode. A separate local feed calculator posts
-fresh ticks (maximum age three seconds), including any indicators referenced by the
-plan:
+The included `daytrader-feed` process discovers symbols in armed plans, subscribes
+to read-only KIS WebSocket trade/quote feeds, calculates the indicator contract,
+and posts authenticated ticks to the simulator:
+
+```bash
+# Run the API first, then the feed in a second terminal.
+uv run daytrader-sim
+uv run daytrader-feed
+```
+
+The target endpoint also accepts another verified enriched feed:
 
 ```bash
 curl -X POST http://127.0.0.1:8787/v1/market-data/ticks \
@@ -97,13 +107,24 @@ curl -X POST http://127.0.0.1:8787/v1/market-data/ticks \
        "indicator_timestamps":{"vwap_regular":"2026-07-15T14:00:00Z"}}'
 ```
 
-Set `KIS_POLL_ENABLED=true` to use the included quotation-only KIS REST fallback.
+Completed one-minute bars persist in `data/feed_history.db`. The exact 20-session
+same-time relative-volume indicator remains unready until 20 prior sessions have
+been collected or imported with `daytrader-feed --import-history bars.csv`.
+
+KIS overseas WebSocket provides a real-time top quote but the official sample does
+not establish that it is NBBO. `FEED_US_QUOTE_SCOPE` therefore defaults to `venue`,
+which intentionally blocks US entry. Set it to `consolidated` only after confirming
+the entitlement and scope of the supplied quote with the data provider. KIS does
+not provide the full LULD/corporate-action status contract in these quote records;
+those safeguards require an additional verified status overlay before production-like
+evaluation.
+
+Set `KIS_POLL_ENABLED=true` to use the quotation-only KIS REST fallback instead.
 It polls only symbols in an armed plan. It supplies price/spread data, not VWAP,
 RSI, opening range, or relative volume; plans that reference missing indicators do
 not enter. US entry also requires the feed to identify a consolidated quote;
 the REST fallback reports `quote_scope=unknown` and therefore cannot arm a US fill
-by itself. KIS's official documentation recommends WebSocket for real-time quotes,
-so use a tested enriched WebSocket feed bridge before latency-sensitive simulation.
+by itself.
 
 ## Daily approval workflow
 
@@ -134,9 +155,9 @@ Then replace the sample's date, expiry, and OTP and post it using
    Action, and configure bearer/API-key authentication with `GPT_ACTION_BEARER`.
 4. Test with a new OTP and confirm a `201` receipt and matching content hash.
 
-The launchd template in `deploy/` keeps the service running. Replace all absolute
-path placeholders before installing it in `~/Library/LaunchAgents`. Run cloudflared
-as a separate launch agent using the restricted ingress configuration.
+The two launchd templates in `deploy/` keep the API and feed running. Replace all
+absolute path placeholders before installing them in `~/Library/LaunchAgents`.
+Run cloudflared as a separate launch agent using the restricted ingress configuration.
 
 ## Rules and simulated fills
 

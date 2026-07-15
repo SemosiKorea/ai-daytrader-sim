@@ -1,6 +1,6 @@
 [project]
 name = "ai-daytrader-sim"
-version = "0.3.0"
+version = "0.4.0"
 description = "GPT-approved, KIS market-data-driven paper day trading simulator"
 requires-python = ">=3.11"
 dependencies = [
@@ -24,6 +24,7 @@ dev = [
 
 [project.scripts]
 daytrader-sim = "daytrader.main:run"
+daytrader-feed = "daytrader.feed:run"
 
 [build-system]
 requires = ["hatchling"]
