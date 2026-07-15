@@ -1,3 +1,3 @@
-"""AI day-trader paper simulator. No live order capability is included."""
+"""AI day-trader simulator with record-only KIS order intents."""
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

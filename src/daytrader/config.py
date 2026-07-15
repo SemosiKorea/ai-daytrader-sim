@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import model_validator
@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     kis_account_number: str | None = None
     kis_product_code: str = "01"
     kis_env: str = "paper"
+    kis_order_mode: Literal["record_only"] = "record_only"
     kis_poll_enabled: bool = False
     kis_poll_seconds: float = 1.0
     universe_path: Path = Path("config/universe.yaml")
@@ -40,6 +41,12 @@ class Settings(BaseSettings):
             raise ValueError("all bearer secrets must be random values of at least 24 characters")
         if len(set(secrets)) != len(secrets):
             raise ValueError("bearer secrets must be different")
+        if self.kis_account_number and (
+            len(self.kis_account_number) != 8 or not self.kis_account_number.isdigit()
+        ):
+            raise ValueError("KIS_ACCOUNT_NUMBER must contain the first eight digits only")
+        if len(self.kis_product_code) != 2 or not self.kis_product_code.isdigit():
+            raise ValueError("KIS_PRODUCT_CODE must contain two digits")
         return self
 
 

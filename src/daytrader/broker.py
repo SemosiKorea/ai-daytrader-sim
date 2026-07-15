@@ -4,11 +4,42 @@ import math
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Literal, Protocol
 from zoneinfo import ZoneInfo
 
 from .config import CostConfig
 from .models import CandidatePlan, Market, MarketTick, OrderState
 from .repository import Repository
+
+
+class OrderIntentRecorder(Protocol):
+    def record_new_order(
+        self,
+        *,
+        order_id: str,
+        idempotency_key: str,
+        plan_id: str,
+        market: Market,
+        symbol: str,
+        exchange: str,
+        side: Literal["BUY", "SELL"],
+        quantity: int,
+        limit_price: float,
+        reason: str,
+    ) -> bool: ...
+
+    def record_cancel_order(
+        self,
+        *,
+        order_id: str,
+        idempotency_key: str,
+        plan_id: str,
+        market: Market,
+        symbol: str,
+        exchange: str,
+        remaining_quantity: int,
+        reason: str,
+    ) -> bool: ...
 
 
 @dataclass
@@ -17,6 +48,7 @@ class PendingOrder:
     idempotency_key: str
     market: Market
     symbol: str
+    exchange: str
     plan_id: str
     state: OrderState
     created_at: datetime
@@ -42,6 +74,7 @@ class PendingOrder:
 class Position:
     market: Market
     symbol: str
+    exchange: str
     plan_id: str
     quantity: int
     remaining: int
@@ -79,11 +112,17 @@ class Portfolio:
 
 
 class PaperBroker:
-    """Stateful paper broker with conservative fills and no live-order capability."""
+    """Stateful paper broker with conservative fills and optional order-intent mirroring."""
 
-    def __init__(self, repository: Repository, costs: dict[str, CostConfig]):
+    def __init__(
+        self,
+        repository: Repository,
+        costs: dict[str, CostConfig],
+        order_intent_recorder: OrderIntentRecorder | None = None,
+    ):
         self.repository = repository
         self.costs = costs
+        self.order_intent_recorder = order_intent_recorder
         self.portfolios = {
             Market(market): Portfolio(Market(market), cost.initial_cash, cost.initial_cash)
             for market, cost in costs.items()
@@ -140,6 +179,7 @@ class PaperBroker:
         return {
             "market": position.market.value,
             "symbol": position.symbol,
+            "exchange": position.exchange,
             "plan_id": position.plan_id,
             "quantity": position.quantity,
             "remaining": position.remaining,
@@ -221,6 +261,7 @@ class PaperBroker:
             position = Position(
                 market=market,
                 symbol=raw["symbol"],
+                exchange=raw.get("exchange", "KRX" if market == Market.KR else "NASDAQ"),
                 plan_id=raw["plan_id"],
                 quantity=int(raw["quantity"]),
                 remaining=int(raw["remaining"]),
@@ -257,6 +298,7 @@ class PaperBroker:
                 idempotency_key=raw["idempotency_key"],
                 market=market,
                 symbol=raw["symbol"],
+                exchange=raw.get("exchange", "KRX" if market == Market.KR else "NASDAQ"),
                 plan_id=raw["plan_id"],
                 state=OrderState(raw["state"]),
                 created_at=datetime.fromisoformat(raw["created_at"]),
@@ -368,6 +410,7 @@ class PaperBroker:
             idempotency_key=key,
             market=market,
             symbol=candidate.symbol,
+            exchange=candidate.exchange,
             plan_id=plan_id,
             state=OrderState.ENTRY_PENDING,
             created_at=timestamp,
@@ -384,6 +427,19 @@ class PaperBroker:
             target_specs=[(target.price, target.quantity_pct) for target in candidate.take_profit],
             exit_policy=candidate.exit_policy.model_dump(mode="json"),
         )
+        if self.order_intent_recorder and not self.order_intent_recorder.record_new_order(
+            order_id=order.order_id,
+            idempotency_key=order.idempotency_key,
+            plan_id=order.plan_id,
+            market=order.market,
+            symbol=order.symbol,
+            exchange=order.exchange,
+            side="BUY",
+            quantity=order.desired_quantity,
+            limit_price=order.limit_price,
+            reason="ENTRY_SIGNAL",
+        ):
+            return None, "ORDER_INTENT_ALREADY_RECORDED"
         portfolio.pending_orders[candidate.symbol] = order
         portfolio.order_submissions_today += 1
         self._save(market)
@@ -446,6 +502,7 @@ class PaperBroker:
             position = Position(
                 market=order.market,
                 symbol=order.symbol,
+                exchange=order.exchange,
                 plan_id=order.plan_id,
                 quantity=0,
                 remaining=0,
@@ -548,6 +605,17 @@ class PaperBroker:
         if not order:
             return
         order.state = state
+        if self.order_intent_recorder:
+            self.order_intent_recorder.record_cancel_order(
+                order_id=order.order_id,
+                idempotency_key=f"{order.idempotency_key}:CANCEL",
+                plan_id=order.plan_id,
+                market=order.market,
+                symbol=order.symbol,
+                exchange=order.exchange,
+                remaining_quantity=order.remaining,
+                reason=reason,
+            )
         self._order_event(
             order,
             state,
@@ -572,6 +640,20 @@ class PaperBroker:
         quantity = min(quantity, position.remaining)
         if quantity <= 0:
             return
+        exit_order_id = str(uuid.uuid4())
+        if self.order_intent_recorder:
+            self.order_intent_recorder.record_new_order(
+                order_id=exit_order_id,
+                idempotency_key=(f"{position.plan_id}:{position.symbol}:EXIT:{exit_order_id}"),
+                plan_id=position.plan_id,
+                market=position.market,
+                symbol=position.symbol,
+                exchange=position.exchange,
+                side="SELL",
+                quantity=quantity,
+                limit_price=tick.bid,
+                reason=reason,
+            )
         gross = tick.bid * quantity
         net, fees = self._exit_net(position.market, gross)
         pnl = net - position.entry_price * quantity
@@ -588,7 +670,7 @@ class PaperBroker:
             position.symbol,
             position.plan_id,
             {
-                "order_id": str(uuid.uuid4()),
+                "order_id": exit_order_id,
                 "state": state.value,
                 "reason": reason,
                 "quantity": quantity,

@@ -4,6 +4,8 @@
 
 눌림목 전략: [`docs/PULLBACK_STRATEGY.ko.md`](docs/PULLBACK_STRATEGY.ko.md)
 
+KIS 주문 기록 게이트웨이: [`docs/KIS_ORDER_GATEWAY.ko.md`](docs/KIS_ORDER_GATEWAY.ko.md)
+
 다음 흐름을 위한 독립형 가상매매 전용 프로그램입니다.
 
 1. Custom GPT가 한국 또는 미국 AI·반도체 종목의 당일 단타 계획을 제안합니다.
@@ -12,6 +14,7 @@
 4. 프로그램이 결정론적 검증을 거쳐 해당 시장의 당일 계획만 활성화합니다.
 5. 읽기 전용 KIS 시세 또는 인증된 확장 시세 피드로 가상 체결을 실행합니다.
 6. 손절, 익절, 위험 제한, 장 마감 청산은 LLM이 아니라 프로그램 코드가 수행합니다.
+7. 주문 결정은 KIS 요청 형식으로 변환해 로컬 원장에만 기록합니다.
 
 이 프로젝트는 OpenAI API 키를 사용하지 않습니다. Custom GPT는 ChatGPT에서
 동작하며, 사용자의 승인 이후 HTTPS Action을 호출합니다. ChatGPT와 GPT 사용
@@ -20,10 +23,15 @@
 
 ## 안전 경계
 
-- 유일한 체결 어댑터는 `PaperBroker`입니다.
+- 유일하게 활성화된 체결 어댑터는 `PaperBroker`입니다.
 - `KISReadOnlyClient`는 시세 조회 GET 경로와 OAuth 토큰 발급만 허용합니다.
 - `place_order()`는 항상 `LiveOrderCapabilityDisabled` 예외를 발생시킵니다.
-- KIS 주문, 계좌, 잔고, Hashkey 및 주문 체결통보 호출은 구현되어 있지 않습니다.
+- 국내·미국 현금주식 지정가 주문과 취소 요청 빌더, OAuth·Hashkey·HTTP 전송
+  계약은 구현되어 있지만 서비스 실행 경로에는 연결되어 있지 않습니다.
+- `KIS_ORDER_MODE=record_only`만 허용되고 프로덕션 전송은 소스코드 단계에서
+  차단됩니다. `.env` 변경만으로 실거래를 활성화할 수 없습니다.
+- 계좌·잔고 대사와 주문 체결통보는 아직 구현하지 않았으므로 실거래 준비
+  상태가 아닙니다.
 - 한국과 미국 시장은 각각 별도의 일회용 45분 승인코드가 필요합니다.
 - 시장별 하루 한 계획과 후보 최대 3개를 허용합니다. 미체결 진입 주문과
   보유 포지션이 시장별 슬롯 하나를 함께 사용합니다.
@@ -67,6 +75,13 @@ curl http://127.0.0.1:8787/healthz
 
 ```bash
 curl -H "Authorization: Bearer $ADMIN_BEARER" http://127.0.0.1:8787/
+```
+
+로컬에 기록된 KIS 주문 의도는 다음 관리자 API에서 확인합니다.
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_BEARER" \
+  http://127.0.0.1:8787/v1/admin/kis-order-intents
 ```
 
 ## 시세 데이터 방식
@@ -209,4 +224,5 @@ uv run pytest
 ```
 
 테스트에는 스키마 및 위험 조건 거절, 일회용 승인, 교차 조건, 가상 체결,
-재시작 후 상태 복원, 오래된 Tick 거절 및 KIS 실제 주문 금지가 포함됩니다.
+재시작 후 상태 복원, 오래된 Tick 거절, 공식 KIS 주문 요청 생성 및 프로덕션
+전송 사전 차단이 포함됩니다.

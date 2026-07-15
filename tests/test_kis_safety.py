@@ -8,7 +8,7 @@ from daytrader.kis_readonly import KISReadOnlyClient, LiveOrderCapabilityDisable
 @pytest.mark.asyncio
 async def test_live_orders_are_impossible() -> None:
     client = KISReadOnlyClient("key", "secret")
-    with pytest.raises(LiveOrderCapabilityDisabled, match="not implemented"):
+    with pytest.raises(LiveOrderCapabilityDisabled, match="record_only"):
         await client.place_order(symbol="005930", quantity=1)
 
 
