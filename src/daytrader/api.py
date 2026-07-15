@@ -72,7 +72,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
 
     app = FastAPI(
         title="AI Day Trader Simulator",
-        version="0.3.0",
+        version="0.4.0",
         description="GPT-approved paper trading only. No live order endpoint exists.",
         lifespan=lifespan,
     )

@@ -73,9 +73,20 @@ curl -H "Authorization: Bearer $ADMIN_BEARER" http://127.0.0.1:8787/
 
 확장 피드의 정확한 계산 규약은
 [`docs/INDICATOR_CONTRACT.ko.md`](docs/INDICATOR_CONTRACT.ko.md)를 따릅니다.
+내장 KIS WebSocket 피드의 설정과 운용 제한은
+[`docs/ENRICHED_FEED.ko.md`](docs/ENRICHED_FEED.ko.md)에 정리되어 있습니다.
 
-기본 방식은 인증된 Push 방식입니다. 별도의 로컬 시세 계산기가 3초 이내의
-최신 Tick과 계획에서 참조하는 기술지표를 전송합니다.
+내장 `daytrader-feed` 프로세스는 승인된 계획의 종목을 자동 발견하고 KIS의
+읽기 전용 WebSocket 체결·호가를 구독합니다. 기술지표를 계산한 뒤 인증된
+Tick을 시뮬레이터로 전송합니다.
+
+```bash
+# API를 먼저 실행하고 두 번째 터미널에서 피드를 실행합니다.
+uv run daytrader-sim
+uv run daytrader-feed
+```
+
+다른 검증된 확장 피드도 동일한 입력 API를 사용할 수 있습니다.
 
 ```bash
 curl -X POST http://127.0.0.1:8787/v1/market-data/ticks \
@@ -93,17 +104,24 @@ curl -X POST http://127.0.0.1:8787/v1/market-data/ticks \
        "indicator_timestamps":{"vwap_regular":"2026-07-15T14:00:00Z"}}'
 ```
 
-내장된 KIS REST 시세 조회 보조 기능을 사용하려면 `KIS_POLL_ENABLED=true`로
+완성된 1분봉은 `data/feed_history.db`에 보존됩니다. 정확한 20거래일 동시간
+상대 거래량은 과거 20세션이 누적되거나 `daytrader-feed --import-history`로
+검증된 분봉을 가져오기 전까지 `ready=false`입니다.
+
+KIS 해외 WebSocket은 미국 실시간 1호가를 제공하지만 공식 샘플만으로 NBBO임을
+확정할 수 없습니다. 따라서 `FEED_US_QUOTE_SCOPE` 기본값은 `venue`이고, 이 상태에서는
+기존 안전 규칙에 따라 미국 신규 진입이 차단됩니다. 데이터 공급자에게 호가 범위를
+확인한 경우에만 `consolidated`로 변경해야 합니다. 해당 실시간 레코드만으로는 전체
+LULD·기업행동 상태도 제공되지 않으므로 실제 운용 수준의 평가에는 별도의 검증된
+상태 피드가 필요합니다.
+
+내장된 KIS REST 시세 조회 보조 기능을 대신 사용하려면 `KIS_POLL_ENABLED=true`로
 설정합니다. 이 기능은 활성화된 계획에 포함된 종목만 조회합니다. 가격과
 스프레드 정보는 제공하지만 VWAP, RSI, 시가 범위, 상대 거래량은 계산하지
 않습니다. 계획에서 참조한 지표가 Tick에 없으면 해당 조건은 거짓으로 처리되어
 진입하지 않습니다. 미국 시장 진입에는 통합호가임이 확인된
 `quote_scope=consolidated`가 필요합니다. REST 보조 기능의 호가 범위는 확인되지
 않은 것으로 처리되므로 이것만으로는 미국 종목을 가상 체결하지 않습니다.
-
-KIS 공식 문서는 실시간 시세가 필요할 때 WebSocket 사용을 권장합니다. 지연에
-민감한 가상매매를 수행하려면 충분히 테스트한 WebSocket 기반 확장 시세
-브리지를 사용하십시오.
 
 ## 매일 승인 절차
 
@@ -139,7 +157,7 @@ curl -X POST http://127.0.0.1:8787/v1/admin/nonces \
 4. 새로운 OTP로 시험하고 응답 코드 `201`, 계획 상태 및 Content Hash가
    올바른지 확인합니다.
 
-`deploy/`의 launchd 템플릿으로 서비스를 계속 실행할 수 있습니다.
+`deploy/`의 두 launchd 템플릿으로 API와 피드를 계속 실행할 수 있습니다.
 `~/Library/LaunchAgents`에 설치하기 전에 모든 절대경로 자리표시자를 실제
 경로로 바꾸십시오. Cloudflared는 제한된 Ingress 설정을 사용해 별도의
 Launch Agent로 실행하는 것을 권장합니다.

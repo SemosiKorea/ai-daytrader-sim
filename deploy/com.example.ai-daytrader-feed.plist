@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.example.ai-daytrader-feed</string>
+  <key>WorkingDirectory</key><string>/ABSOLUTE/PATH/ai-daytrader-sim</string>
+  <key>ProgramArguments</key><array>
+    <string>/ABSOLUTE/PATH/TO/uv</string><string>run</string><string>daytrader-feed</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/ai-daytrader-feed.out.log</string>
+  <key>StandardErrorPath</key><string>/tmp/ai-daytrader-feed.err.log</string>
+</dict></plist>
