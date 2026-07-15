@@ -57,12 +57,15 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     )
     broker = PaperBroker(repository, costs, order_intent_recorder)
     engine = TradingEngine(repository, broker)
+    engine.recover_expired_state()
     notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
-    session_scheduler = SessionScheduler(repository, engine, broker, notifier)
     quote_poller = None
     candidate_scanner = CandidateScanner(repository, universe, settings)
     experiment_manager = PortfolioExperimentManager(
         repository, costs, settings.experiment_data_path
+    )
+    session_scheduler = SessionScheduler(
+        repository, engine, broker, notifier, experiment_manager
     )
     if settings.kis_poll_enabled:
         if not settings.kis_app_key or not settings.kis_app_secret:
@@ -73,6 +76,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
             engine,
             universe,
             settings.kis_poll_seconds,
+            experiment_manager,
         )
 
     @asynccontextmanager
@@ -129,7 +133,9 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     ) -> NonceResponse:
         _require(settings.admin_bearer, authorization)
         nonce, expires_at = repository.issue_nonce(payload.market, payload.trade_date)
-        await notifier.send(f"[{payload.market.value}] 승인코드 {nonce} / {payload.trade_date}")
+        await notifier.send_best_effort(
+            f"[{payload.market.value}] 승인코드 {nonce} / {payload.trade_date}"
+        )
         return NonceResponse(
             market=payload.market,
             trade_date=payload.trade_date,
@@ -171,7 +177,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
                 {"reason": "INVALID_EXPIRED_OR_REUSED_APPROVAL_CODE"},
             )
             raise HTTPException(status_code=409, detail="invalid, expired, or reused approval code")
-        await notifier.send(
+        await notifier.send_best_effort(
             f"[{plan.market.value}] 계획 승인 완료: {plan.plan_id}\n"
             f"종목: {', '.join(c.symbol for c in plan.approved_symbols)}"
         )
@@ -222,14 +228,25 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
                 {"experiment_id": request.experiment_id, "reason": str(exc)},
             )
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if repository.get_portfolio_experiment(request.experiment_id):
+            raise HTTPException(status_code=409, detail="duplicate experiment")
+        if not repository.nonce_is_valid(
+            request.market, request.trade_date, request.approval_nonce
+        ):
+            raise HTTPException(status_code=409, detail="invalid, expired, or reused approval code")
+        snapshot = experiment_manager.build_snapshot(request)
+        prepared_runtime = experiment_manager.register(
+            request, active=False, snapshot=snapshot
+        )
         try:
-            approved = repository.approve_portfolio_experiment(request)
+            approved = repository.approve_portfolio_experiment(request, snapshot)
         except sqlite3.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="duplicate experiment") from exc
         if not approved:
+            experiment_manager.discard_prepared(prepared_runtime)
             raise HTTPException(status_code=409, detail="invalid, expired, or reused approval code")
-        experiment_manager.register(request)
-        await notifier.send(
+        experiment_manager.activate(prepared_runtime)
+        await notifier.send_best_effort(
             f"[{request.market.value}] 비교실험 시작: {request.experiment_id}\n"
             f"GPT 전체: {', '.join(item.symbol for item in request.candidates)}\n"
             f"사용자 선택: {', '.join(request.user_selected_symbols)}"

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, replace
+import shutil
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,7 @@ from .allocation import AllocationResult, WholeShareAllocator
 from .broker import PaperBroker
 from .config import CostConfig
 from .engine import TradingEngine
-from .market_clock import MARKET_TZ
+from .market_clock import MARKET_TZ, session_bounds
 from .models import (
     ExperimentCohort,
     MarketTick,
@@ -65,12 +66,13 @@ class PortfolioExperimentManager:
     def _restore_active(self) -> None:
         now = datetime.now(UTC)
         for request in self.repository.active_portfolio_experiments():
+            runtime = self.register(request)
             if request.expires_at.astimezone(UTC) <= now:
-                self.repository.set_portfolio_experiment_status(
-                    request.experiment_id, "EXPIRED"
-                )
-                continue
-            self.register(request)
+                _, session_close = session_bounds(request.market, request.trade_date)
+                if now >= session_close.astimezone(UTC):
+                    self._settle_with_last_known_quotes(
+                        runtime, "RESTART_AFTER_EXPERIMENT_EXPIRY"
+                    )
 
     @staticmethod
     def _cohort_candidates(
@@ -111,6 +113,44 @@ class PortfolioExperimentManager:
             max_quantity=whole_share_limit,
         )
 
+    def build_snapshot(self, request: PortfolioExperimentRequest) -> dict[str, Any]:
+        allocations: dict[str, dict[str, Any]] = {}
+        for cohort in ExperimentCohort:
+            candidates = self._cohort_candidates(request, cohort)
+            allocation = self._allocation(request, cohort, candidates)
+            allocations[cohort.value] = {
+                "quantities": allocation.quantities,
+                "target_weights": allocation.target_weights,
+                "estimated_invested": allocation.estimated_invested,
+                "estimated_cash": allocation.estimated_cash,
+            }
+        return {
+            "version": 1,
+            "cost": asdict(self.costs[request.market.value]),
+            "allocations": allocations,
+        }
+
+    def _snapshot(self, request: PortfolioExperimentRequest) -> dict[str, Any]:
+        row = self.repository.get_portfolio_experiment(request.experiment_id)
+        if row and row.get("config_payload"):
+            return json.loads(row["config_payload"])
+        snapshot = self.build_snapshot(request)
+        if row:
+            self.repository.save_portfolio_experiment_config(request.experiment_id, snapshot)
+        return snapshot
+
+    @staticmethod
+    def _saved_allocation(snapshot: dict[str, Any], cohort: ExperimentCohort) -> AllocationResult:
+        raw = snapshot["allocations"][cohort.value]
+        return AllocationResult(
+            quantities={key: int(value) for key, value in raw["quantities"].items()},
+            target_weights={
+                key: float(value) for key, value in raw["target_weights"].items()
+            },
+            estimated_invested=float(raw["estimated_invested"]),
+            estimated_cash=float(raw["estimated_cash"]),
+        )
+
     def _plan(
         self,
         request: PortfolioExperimentRequest,
@@ -128,21 +168,26 @@ class PortfolioExperimentManager:
         )
 
     def register(
-        self, request: PortfolioExperimentRequest, *, active: bool = True
+        self,
+        request: PortfolioExperimentRequest,
+        *,
+        active: bool = True,
+        snapshot: dict[str, Any] | None = None,
     ) -> ExperimentRuntime:
         existing = self.runtimes.get(request.experiment_id) if active else None
         if existing:
             return existing
+        snapshot = snapshot or self._snapshot(request)
+        base_cost = CostConfig(**snapshot["cost"])
         cohorts: dict[ExperimentCohort, CohortRuntime] = {}
         for cohort in ExperimentCohort:
             candidates = self._cohort_candidates(request, cohort)
-            allocation = self._allocation(request, cohort, candidates)
+            allocation = self._saved_allocation(snapshot, cohort)
             cohort_path = self.data_path / request.experiment_id / f"{cohort.value}.db"
             cohort_repository = Repository(cohort_path)
             plan = self._plan(request, cohort, candidates)
             if cohort_repository.get_plan(plan.plan_id) is None:
                 cohort_repository.store_plan(plan, PlanStatus.ARMED)
-            base_cost = self.costs[request.market.value]
             experiment_cost = replace(
                 base_cost,
                 max_order_submissions_per_day=max(
@@ -179,6 +224,51 @@ class PortfolioExperimentManager:
             self.runtimes[request.experiment_id] = runtime
         return runtime
 
+    def activate(self, runtime: ExperimentRuntime) -> None:
+        self.runtimes[runtime.request.experiment_id] = runtime
+
+    def discard_prepared(self, runtime: ExperimentRuntime) -> None:
+        if runtime.request.experiment_id in self.runtimes:
+            return
+        path = self.data_path / runtime.request.experiment_id
+        if path.is_dir():
+            shutil.rmtree(path)
+
+    def _finish_if_terminal(self, experiment_id: str, runtime: ExperimentRuntime) -> bool:
+        statuses = [
+            cohort.repository.get_plan(cohort.plan.plan_id)["status"]
+            for cohort in runtime.cohorts.values()
+        ]
+        if not all(status in TERMINAL_PLAN_STATUSES for status in statuses):
+            return False
+        self.repository.set_portfolio_experiment_status(experiment_id, "COMPLETED")
+        self.runtimes.pop(experiment_id, None)
+        return True
+
+    def _settle_with_last_known_quotes(
+        self, runtime: ExperimentRuntime, reason: str
+    ) -> bool:
+        ticks = {
+            tick.symbol.upper(): tick
+            for tick in self.repository.market_snapshots(
+                runtime.request.market, runtime.request.trade_date, "regular"
+            )
+        }
+        fully_closed = True
+        for cohort in runtime.cohorts.values():
+            cohort.broker.recovery_force_close(runtime.request.market, ticks, reason)
+            portfolio = cohort.broker.view(runtime.request.market)
+            closed = not portfolio["positions"] and not portfolio["pending_orders"]
+            fully_closed = fully_closed and closed
+            cohort.repository.set_plan_status(
+                cohort.plan.plan_id,
+                PlanStatus.COMPLETED if closed else PlanStatus.EXPIRED,
+            )
+        status = "COMPLETED" if fully_closed else "RECOVERY_REQUIRED"
+        self.repository.set_portfolio_experiment_status(runtime.request.experiment_id, status)
+        self.runtimes.pop(runtime.request.experiment_id, None)
+        return fully_closed
+
     def process_tick(self, tick: MarketTick) -> None:
         local_date = tick.source_timestamp.astimezone(MARKET_TZ[tick.market]).date()
         for experiment_id, runtime in list(self.runtimes.items()):
@@ -187,18 +277,43 @@ class PortfolioExperimentManager:
                 continue
             for cohort in runtime.cohorts.values():
                 cohort.engine.process_tick(tick.model_copy(deep=True))
-            statuses = [
-                cohort.repository.get_plan(cohort.plan.plan_id)["status"]
-                for cohort in runtime.cohorts.values()
-            ]
-            if all(status in TERMINAL_PLAN_STATUSES for status in statuses):
-                self.repository.set_portfolio_experiment_status(experiment_id, "COMPLETED")
-                self.runtimes.pop(experiment_id, None)
+            self._finish_if_terminal(experiment_id, runtime)
 
     def maintenance(self) -> None:
-        for runtime in self.runtimes.values():
+        now = datetime.now(UTC)
+        for runtime in list(self.runtimes.values()):
             for cohort in runtime.cohorts.values():
                 cohort.engine.maintenance()
+            if runtime.request.expires_at.astimezone(UTC) <= now:
+                for cohort in runtime.cohorts.values():
+                    cohort.engine.force_close_market(
+                        runtime.request.market, "EXPERIMENT_EXPIRED"
+                    )
+                _, session_close = session_bounds(
+                    runtime.request.market, runtime.request.trade_date
+                )
+                if now >= session_close.astimezone(UTC):
+                    self._settle_with_last_known_quotes(runtime, "EXPERIMENT_EXPIRED")
+                else:
+                    self._finish_if_terminal(runtime.request.experiment_id, runtime)
+
+    def force_close_market(self, market, trade_date) -> bool:
+        matching = [
+            runtime
+            for runtime in self.runtimes.values()
+            if runtime.request.market == market and runtime.request.trade_date == trade_date
+        ]
+        fully_closed = True
+        for runtime in matching:
+            for cohort in runtime.cohorts.values():
+                cohort.engine.force_close_market(market)
+                portfolio = cohort.broker.view(market)
+                closed = not portfolio["positions"] and not portfolio["pending_orders"]
+                fully_closed = fully_closed and closed
+                if closed:
+                    cohort.repository.set_plan_status(cohort.plan.plan_id, PlanStatus.COMPLETED)
+            self._finish_if_terminal(runtime.request.experiment_id, runtime)
+        return fully_closed
 
     @staticmethod
     def _symbol_results(repository: Repository) -> dict[str, dict[str, float | int]]:
@@ -207,9 +322,15 @@ class PortfolioExperimentManager:
             if event["event_type"] != "PAPER_POSITION_CLOSED" or not event["symbol"]:
                 continue
             payload = json.loads(event["payload"])
-            item = results.setdefault(event["symbol"], {"trades": 0, "net_pnl": 0.0})
+            item = results.setdefault(
+                event["symbol"],
+                {"trades": 0, "net_pnl": 0.0, "return_pct_sum": 0.0},
+            )
             item["trades"] = int(item["trades"]) + 1
             item["net_pnl"] = float(item["net_pnl"]) + float(payload.get("pnl", 0.0))
+            item["return_pct_sum"] = float(item["return_pct_sum"]) + float(
+                payload.get("return_pct", 0.0)
+            )
         return results
 
     def view(self, experiment_id: str) -> dict[str, Any] | None:
@@ -246,16 +367,28 @@ class PortfolioExperimentManager:
         all_results = all_cohort["symbol_results"]
         selected = set(runtime.request.user_selected_symbols)
 
-        def result_totals(symbols: set[str]) -> tuple[int, float]:
+        def result_totals(symbols: set[str]) -> tuple[int, float, float]:
             trades = sum(int(all_results.get(symbol, {}).get("trades", 0)) for symbol in symbols)
             pnl = sum(float(all_results.get(symbol, {}).get("net_pnl", 0.0)) for symbol in symbols)
-            return trades, pnl
+            return_sum = sum(
+                float(all_results.get(symbol, {}).get("return_pct_sum", 0.0))
+                for symbol in symbols
+            )
+            return trades, pnl, return_sum
 
         candidate_symbols = {item.symbol for item in runtime.request.candidates}
-        selected_trades, selected_pnl = result_totals(selected)
-        excluded_trades, excluded_pnl = result_totals(candidate_symbols - selected)
+        selected_trades, selected_pnl, selected_return_sum = result_totals(selected)
+        excluded_trades, excluded_pnl, excluded_return_sum = result_totals(
+            candidate_symbols - selected
+        )
         selected_average = selected_pnl / selected_trades if selected_trades else None
         excluded_average = excluded_pnl / excluded_trades if excluded_trades else None
+        selected_average_return = (
+            selected_return_sum / selected_trades if selected_trades else None
+        )
+        excluded_average_return = (
+            excluded_return_sum / excluded_trades if excluded_trades else None
+        )
         comparison = {
             "user_fixed_minus_gpt_all_net_pnl": (
                 fixed_cohort["performance"]["net_pnl"]
@@ -274,6 +407,14 @@ class PortfolioExperimentManager:
             "selection_uplift_per_trade": (
                 selected_average - excluded_average
                 if selected_average is not None and excluded_average is not None
+                else None
+            ),
+            "selected_average_trade_return_pct_in_gpt_all": selected_average_return,
+            "excluded_average_trade_return_pct_in_gpt_all": excluded_average_return,
+            "selection_uplift_return_pct": (
+                selected_average_return - excluded_average_return
+                if selected_average_return is not None
+                and excluded_average_return is not None
                 else None
             ),
         }

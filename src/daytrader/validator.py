@@ -28,11 +28,15 @@ def _rule_indicators(group: RuleGroup) -> set[str]:
 
 
 def _assert_no_contradictions(group: RuleGroup) -> None:
-    if group.mode == "all":
-        predicates = list(group.predicates)
-        for child in group.groups:
+    def conjunctive_predicates(value: RuleGroup) -> list:
+        predicates = list(value.predicates)
+        for child in value.groups:
             if child.mode == "all":
-                predicates.extend(child.predicates)
+                predicates.extend(conjunctive_predicates(child))
+        return predicates
+
+    if group.mode == "all":
+        predicates = conjunctive_predicates(group)
         bounds: dict[str, dict[str, tuple[float, bool]]] = {}
         equals: dict[str, float | bool] = {}
         not_equals: dict[str, set[float | bool]] = {}

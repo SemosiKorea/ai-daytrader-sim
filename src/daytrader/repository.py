@@ -123,13 +123,28 @@ class Repository:
                     trade_date TEXT NOT NULL,
                     status TEXT NOT NULL,
                     payload TEXT NOT NULL,
+                    config_payload TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_portfolio_experiments_active
                     ON portfolio_experiments(market, trade_date, status);
+                CREATE TABLE IF NOT EXISTS equity_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    market TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    equity REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_equity_snapshots_market_time
+                    ON equity_snapshots(market, timestamp, id);
                 """
             )
+            columns = {
+                row["name"]
+                for row in db.execute("PRAGMA table_info(portfolio_experiments)").fetchall()
+            }
+            if "config_payload" not in columns:
+                db.execute("ALTER TABLE portfolio_experiments ADD COLUMN config_payload TEXT")
 
     @staticmethod
     def _hash(value: str) -> str:
@@ -169,7 +184,25 @@ class Repository:
             )
             return db.total_changes == 1
 
-    def approve_portfolio_experiment(self, request: PortfolioExperimentRequest) -> bool:
+    def nonce_is_valid(self, market: Market, trade_date: date, nonce: str) -> bool:
+        now = datetime.now(UTC)
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM nonces WHERE market=? AND trade_date=?",
+                (market.value, trade_date.isoformat()),
+            ).fetchone()
+        return bool(
+            row
+            and not row["used_at"]
+            and row["nonce_hash"] == self._hash(nonce)
+            and datetime.fromisoformat(row["expires_at"]) >= now
+        )
+
+    def approve_portfolio_experiment(
+        self,
+        request: PortfolioExperimentRequest,
+        config_snapshot: dict[str, Any] | None = None,
+    ) -> bool:
         """Consume the OTP and persist an isolated paper experiment atomically."""
         payload = request.model_copy(update={"approval_nonce": "000000"}).model_dump_json()
         now = datetime.now(UTC)
@@ -187,14 +220,17 @@ class Repository:
                 return False
             db.execute(
                 """INSERT INTO portfolio_experiments(
-                       experiment_id, market, trade_date, status, payload,
+                       experiment_id, market, trade_date, status, payload, config_payload,
                        created_at, updated_at
-                   ) VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?)""",
+                   ) VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, ?)""",
                 (
                     request.experiment_id,
                     request.market.value,
                     request.trade_date.isoformat(),
                     payload,
+                    json.dumps(config_snapshot, ensure_ascii=False, default=str)
+                    if config_snapshot
+                    else None,
                     now.isoformat(),
                     now.isoformat(),
                 ),
@@ -247,6 +283,21 @@ class Repository:
             db.execute(
                 "UPDATE portfolio_experiments SET status=?, updated_at=? WHERE experiment_id=?",
                 (status, datetime.now(UTC).isoformat(), experiment_id),
+            )
+
+    def save_portfolio_experiment_config(
+        self, experiment_id: str, config_snapshot: dict[str, Any]
+    ) -> None:
+        with self._lock, self._connect() as db:
+            db.execute(
+                """UPDATE portfolio_experiments
+                   SET config_payload=?, updated_at=?
+                   WHERE experiment_id=? AND config_payload IS NULL""",
+                (
+                    json.dumps(config_snapshot, ensure_ascii=False, default=str),
+                    datetime.now(UTC).isoformat(),
+                    experiment_id,
+                ),
             )
 
     def store_plan(self, plan: TradePlan, status: PlanStatus) -> str:
@@ -589,6 +640,24 @@ class Repository:
                 "SELECT payload FROM portfolio_states WHERE market=?", (market.value,)
             ).fetchone()
         return json.loads(row["payload"]) if row else None
+
+    def record_equity_snapshot(
+        self, market: Market, timestamp: datetime, equity: float
+    ) -> None:
+        with self._lock, self._connect() as db:
+            db.execute(
+                "INSERT INTO equity_snapshots(market, timestamp, equity) VALUES (?, ?, ?)",
+                (market.value, timestamp.isoformat(), float(equity)),
+            )
+
+    def equity_values(self, market: Market) -> list[float]:
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT equity FROM equity_snapshots
+                   WHERE market=? ORDER BY timestamp, id""",
+                (market.value,),
+            ).fetchall()
+        return [float(row["equity"]) for row in rows]
 
     def closed_trade_pnls(self, market: Market) -> list[float]:
         with self._connect() as db:

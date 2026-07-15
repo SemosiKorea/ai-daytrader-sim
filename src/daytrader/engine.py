@@ -528,13 +528,86 @@ class TradingEngine:
             self.previous_context[key] = self.context(tick)
         return {"accepted": True}
 
-    def force_close_market(self, market: Market, reason: str = "SESSION_FORCE_CLOSE") -> None:
+    def force_close_market(
+        self,
+        market: Market,
+        reason: str = "SESSION_FORCE_CLOSE",
+        now: datetime | None = None,
+    ) -> dict[str, list[str]]:
+        now = (now or datetime.now(UTC)).astimezone(UTC)
+        policy = self.broker.costs[market.value]
         ticks = {
             symbol: tick
             for (tick_market, symbol), tick in self.latest_ticks.items()
             if tick_market == market
+            and tick.market_status == "open"
+            and tick.symbol_status == "trading"
+            and tick.bid <= tick.ask
+            and 0
+            <= (
+                now - (tick.source_timestamp or tick.timestamp).astimezone(UTC)
+            ).total_seconds()
+            <= policy.max_tick_age_seconds
         }
         self.broker.force_close(market, ticks, reason)
+        portfolio = self.broker.portfolios[market]
+        missing = sorted(set(portfolio.positions) - set(ticks))
+        if missing:
+            self.repository.add_event(
+                "UNPRICED_FORCE_CLOSE_PENDING",
+                market,
+                None,
+                None,
+                {"reason": reason, "symbols": missing},
+            )
+        return {"priced_symbols": sorted(ticks), "unpriced_symbols": missing}
+
+    def recovery_force_close_market(
+        self, market: Market, trade_date, reason: str = "RECOVERY_LAST_KNOWN_QUOTE"
+    ) -> bool:
+        ticks = {
+            tick.symbol.upper(): tick
+            for tick in self.repository.market_snapshots(market, trade_date, "regular")
+        }
+        self.broker.recovery_force_close(market, ticks, reason)
+        portfolio = self.broker.view(market)
+        fully_closed = not portfolio["positions"] and not portfolio["pending_orders"]
+        if fully_closed:
+            for plan in self.repository.active_plans(market, trade_date):
+                self.repository.set_plan_status(plan.plan_id, PlanStatus.COMPLETED)
+        else:
+            self.repository.add_event(
+                "RECOVERY_FORCE_CLOSE_REQUIRED",
+                market,
+                None,
+                None,
+                {
+                    "trade_date": trade_date,
+                    "symbols": [item["symbol"] for item in portfolio["positions"]],
+                },
+            )
+        return fully_closed
+
+    def recover_expired_state(self) -> None:
+        now = datetime.now(UTC)
+        for market, portfolio in self.broker.portfolios.items():
+            trade_dates = set()
+            for position in portfolio.positions.values():
+                row = self.repository.get_plan(position.plan_id)
+                if row:
+                    plan = TradePlan.model_validate_json(row["payload"])
+                    if plan.expires_at.astimezone(UTC) <= now:
+                        trade_dates.add(plan.trade_date)
+            for order in portfolio.pending_orders.values():
+                row = self.repository.get_plan(order.plan_id)
+                if row:
+                    plan = TradePlan.model_validate_json(row["payload"])
+                    if plan.expires_at.astimezone(UTC) <= now:
+                        trade_dates.add(plan.trade_date)
+            for trade_date in sorted(trade_dates):
+                self.recovery_force_close_market(
+                    market, trade_date, "RESTART_AFTER_PLAN_EXPIRY"
+                )
 
     def maintenance(self) -> None:
         self.broker.expire_pending(datetime.now(UTC))

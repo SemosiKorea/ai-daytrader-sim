@@ -229,11 +229,12 @@ one OTP-approved request to `POST /v1/gpt-actions/experiments`. It creates isola
 `GPT_ALL_EQUAL`, `USER_FIXED_SLEEVE`, and `USER_REALLOCATED` paper ledgers driven by
 the same ticks and fill model. Read the comparison from
 `GET /v1/gpt-actions/experiments/{experiment_id}`. Experiment ledgers never instantiate
-the KIS order-intent recorder.
+the KIS order-intent recorder. Approval-time costs, initial cash, target weights, and
+whole-share allocations are stored as an immutable experiment snapshot.
 
-Use `GET /v1/performance/KR` and `/US` with `ADMIN_BEARER`. Metrics are computed from
-closed paper positions persisted in the audit log: trade count, net P&L, profit
-factor, and maximum drawdown. The intended gate is at least 30 market sessions and
+Use `GET /v1/performance/KR` and `/US` with `ADMIN_BEARER`. Trade count and profit
+factor use closed-position audit events; net P&L and maximum drawdown use the
+mark-to-market equity series, including open positions. The intended gate is at least 30 market sessions and
 50 closed trades combined, positive net P&L, profit factor >=1.2, and MDD <=5%.
 Passing a paper test is not evidence that live execution will perform similarly.
 

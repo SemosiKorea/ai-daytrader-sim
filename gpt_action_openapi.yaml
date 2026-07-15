@@ -112,7 +112,7 @@ paths:
                 type: object
                 additionalProperties: true
                 required: [experiment_id, status, market, trade_date, candidate_symbols,
-                  user_selected_symbols, cohorts]
+                  user_selected_symbols, cohorts, comparison]
                 properties:
                   experiment_id: {type: string}
                   status: {type: string}
@@ -122,8 +122,13 @@ paths:
                   user_selected_symbols: {type: array, items: {type: string}}
                   cohorts:
                     type: object
-                    additionalProperties: true
-                    properties: {}
+                    additionalProperties: false
+                    required: [GPT_ALL_EQUAL, USER_FIXED_SLEEVE, USER_REALLOCATED]
+                    properties:
+                      GPT_ALL_EQUAL: {$ref: '#/components/schemas/CohortResult'}
+                      USER_FIXED_SLEEVE: {$ref: '#/components/schemas/CohortResult'}
+                      USER_REALLOCATED: {$ref: '#/components/schemas/CohortResult'}
+                  comparison: {$ref: '#/components/schemas/ExperimentComparison'}
 components:
   securitySchemes:
     bearerAuth:
@@ -183,6 +188,77 @@ components:
             type: string
             enum: [GPT_ALL_EQUAL, USER_FIXED_SLEEVE, USER_REALLOCATED]
         message: {type: string}
+    CohortResult:
+      type: object
+      additionalProperties: true
+      required: [plan_status, allocation, portfolio, performance]
+      properties:
+        plan_status: {type: string}
+        allocation: {$ref: '#/components/schemas/AllocationResult'}
+        portfolio: {$ref: '#/components/schemas/ExperimentPortfolio'}
+        performance: {$ref: '#/components/schemas/ExperimentPerformance'}
+    AllocationResult:
+      type: object
+      additionalProperties: true
+      required: [quantities, target_weights, estimated_invested, estimated_cash]
+      properties:
+        quantities:
+          type: object
+          additionalProperties: {type: integer}
+          properties:
+            example_symbol: {type: integer}
+        target_weights:
+          type: object
+          additionalProperties: {type: number}
+          properties:
+            example_symbol: {type: number}
+        estimated_invested: {type: number}
+        estimated_cash: {type: number}
+    ExperimentPortfolio:
+      type: object
+      additionalProperties: true
+      required: [market, cash, equity, realized_pnl, positions, pending_orders]
+      properties:
+        market: {type: string, enum: [KR, US]}
+        cash: {type: number}
+        equity: {type: number}
+        realized_pnl: {type: number}
+        positions:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              symbol: {type: string}
+              remaining: {type: integer}
+        pending_orders:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              symbol: {type: string}
+              state: {type: string}
+    ExperimentPerformance:
+      type: object
+      additionalProperties: true
+      required: [market, closed_trades, net_pnl, realized_net_pnl, max_drawdown_pct]
+      properties:
+        market: {type: string, enum: [KR, US]}
+        closed_trades: {type: integer}
+        net_pnl: {type: number}
+        realized_net_pnl: {type: number}
+        profit_factor: {type: [number, 'null']}
+        max_drawdown_pct: {type: number}
+    ExperimentComparison:
+      type: object
+      additionalProperties: true
+      properties:
+        user_fixed_minus_gpt_all_net_pnl: {type: number}
+        user_reallocated_minus_gpt_all_net_pnl: {type: number}
+        concentration_effect_net_pnl: {type: number}
+        selection_uplift_per_trade: {type: [number, 'null']}
+        selection_uplift_return_pct: {type: [number, 'null']}
     Candidate:
       type: object
       additionalProperties: false

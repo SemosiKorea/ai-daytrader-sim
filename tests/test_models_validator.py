@@ -48,3 +48,38 @@ def test_contradictory_all_group_is_rejected(kr_plan_dict: dict) -> None:
     costs = {"KR": CostConfig(3_000_000, 0, 0, 0, 0)}
     with pytest.raises(PlanValidationError, match="contradictory"):
         validate_plan(plan, universe, costs)
+
+
+def test_deeply_nested_contradictory_all_group_is_rejected(kr_plan_dict: dict) -> None:
+    entry = kr_plan_dict["approved_symbols"][0]["entry"]
+    entry["price_only"] = False
+    entry["rules"] = {
+        "mode": "all",
+        "predicates": [
+            {"indicator": "rsi_14_1m_regular", "operator": "gte", "value": 70}
+        ],
+        "groups": [
+            {
+                "mode": "all",
+                "predicates": [],
+                "groups": [
+                    {
+                        "mode": "all",
+                        "predicates": [
+                            {
+                                "indicator": "rsi_14_1m_regular",
+                                "operator": "lte",
+                                "value": 50,
+                            }
+                        ],
+                        "groups": [],
+                    }
+                ],
+            }
+        ],
+    }
+    plan = TradePlan.model_validate(kr_plan_dict)
+    universe = {"KR": {"005930": {"exchange": "KRX", "name": "Samsung"}}}
+    costs = {"KR": CostConfig(3_000_000, 0, 0, 0, 0)}
+    with pytest.raises(PlanValidationError, match="contradictory"):
+        validate_plan(plan, universe, costs)

@@ -7,6 +7,7 @@ from daytrader.allocation import WholeShareAllocator
 from daytrader.broker import PaperBroker
 from daytrader.config import CostConfig
 from daytrader.experiment import PortfolioExperimentManager
+from daytrader.market_clock import session_bounds
 from daytrader.models import (
     CandidatePlan,
     ExperimentCohort,
@@ -156,11 +157,20 @@ def test_manager_builds_three_isolated_allocations_and_restores(tmp_path) -> Non
         for cohort in runtime.cohorts.values()
     )
 
-    restored = PortfolioExperimentManager(repository, costs, tmp_path / "experiments")
+    changed_costs = {"US": CostConfig(1_000, 10, 10, 0, 5)}
+    restored = PortfolioExperimentManager(
+        repository, changed_costs, tmp_path / "experiments"
+    )
     assert request.experiment_id in restored.runtimes
     view = restored.view(request.experiment_id)
     assert view and set(view["cohorts"]) == {cohort.value for cohort in ExperimentCohort}
     assert "comparison" in view
+    assert restored.runtimes[request.experiment_id].cohorts[
+        ExperimentCohort.GPT_ALL_EQUAL
+    ].allocation.quantities == {"AAA": 1, "BBB": 1}
+    assert restored.runtimes[request.experiment_id].cohorts[
+        ExperimentCohort.GPT_ALL_EQUAL
+    ].broker.portfolios[Market.US].initial_cash == 100
 
 
 def test_identical_ticks_fill_all_and_selected_cohorts_independently(
@@ -224,3 +234,67 @@ def test_identical_ticks_fill_all_and_selected_cohorts_independently(
     assert set(reallocated_positions) == {"AAA"}
     assert fixed_positions["AAA"].quantity == 8
     assert reallocated_positions["AAA"].quantity == 16
+
+
+def test_expired_experiment_settles_with_persisted_last_quote(
+    tmp_path, monkeypatch
+) -> None:
+    repository = Repository(tmp_path / "main.db")
+    now = datetime.now(UTC)
+    local_date = now.astimezone(ZoneInfo("America/New_York")).date()
+    candidate = _candidate("AAA", 60)
+    candidate.entry.start_time = datetime.min.time()
+    candidate.entry.end_time = datetime.max.time().replace(microsecond=0)
+    request = PortfolioExperimentRequest(
+        experiment_id="US_expiry_recovery",
+        created_at=now,
+        market=Market.US,
+        trade_date=local_date,
+        expires_at=now + timedelta(days=1),
+        approval_nonce="123456",
+        candidates=[candidate],
+        user_selected_symbols=["AAA"],
+    )
+    nonce, _ = repository.issue_nonce(Market.US, local_date)
+    request.approval_nonce = nonce
+    assert repository.approve_portfolio_experiment(request)
+    manager = PortfolioExperimentManager(
+        repository,
+        {"US": CostConfig(1_000, 0, 0, 0, 0)},
+        tmp_path / "experiments",
+    )
+    monkeypatch.setattr(
+        "daytrader.engine.force_exit_at",
+        lambda market, trade_date: now.astimezone(ZoneInfo("America/New_York"))
+        + timedelta(hours=1),
+    )
+    trigger = _tick("AAA", now, 60)
+    fill = _tick("AAA", now + timedelta(milliseconds=400), 60)
+    repository.save_market_snapshot(trigger, local_date)
+    repository.save_market_snapshot(fill, local_date)
+    manager.process_tick(trigger)
+    manager.process_tick(fill)
+    runtime = manager.runtimes[request.experiment_id]
+    assert all(
+        cohort.broker.portfolios[Market.US].positions
+        for cohort in runtime.cohorts.values()
+    )
+
+    _, close_at = session_bounds(Market.US, local_date)
+    runtime.request.expires_at = close_at - timedelta(seconds=1)
+
+    class AfterCloseDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = close_at + timedelta(seconds=1)
+            return value.astimezone(tz) if tz else value
+
+    monkeypatch.setattr("daytrader.experiment.datetime", AfterCloseDateTime)
+    manager.maintenance()
+
+    assert repository.get_portfolio_experiment(request.experiment_id)["status"] == "COMPLETED"
+    assert request.experiment_id not in manager.runtimes
+    assert all(
+        not cohort.broker.portfolios[Market.US].positions
+        for cohort in runtime.cohorts.values()
+    )

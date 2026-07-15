@@ -32,3 +32,5 @@ async def test_telegram_http_error_never_exposes_bot_token(monkeypatch) -> None:
 
     assert str(raised.value) == "Telegram send failed with HTTP 404"
     assert token not in str(raised.value)
+
+    assert await notifier.send_best_effort("test") is False

@@ -48,6 +48,15 @@ def test_action_object_responses_declare_properties() -> None:
     status_schema = schema["components"]["schemas"]["PlanStatusResponse"]
     assert status_schema["type"] == "object"
     assert status_schema["properties"]
+    experiment = schema["paths"]["/v1/gpt-actions/experiments/{experiment_id}"]["get"]
+    response = experiment["responses"]["200"]["content"]["application/json"]["schema"]
+    cohorts = response["properties"]["cohorts"]
+    assert cohorts["properties"]
+    assert set(cohorts["properties"]) == {
+        "GPT_ALL_EQUAL",
+        "USER_FIXED_SLEEVE",
+        "USER_REALLOCATED",
+    }
 
 
 def test_action_indicator_enum_matches_runtime() -> None:

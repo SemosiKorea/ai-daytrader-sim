@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import logging
+
 import httpx
+
+
+logger = logging.getLogger(__name__)
 
 
 class TelegramDeliveryError(RuntimeError):
@@ -33,3 +38,11 @@ class TelegramNotifier:
         except httpx.HTTPError:
             raise TelegramDeliveryError("Telegram send request failed") from None
         return True
+
+    async def send_best_effort(self, message: str) -> bool:
+        """Deliver an operational notification without changing committed trading state."""
+        try:
+            return await self.send(message)
+        except TelegramDeliveryError as exc:
+            logger.warning("Telegram notification skipped: %s", exc)
+            return False

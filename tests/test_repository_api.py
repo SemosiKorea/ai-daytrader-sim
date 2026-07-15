@@ -56,6 +56,7 @@ def test_approval_code_is_one_time_and_dashboard_is_private(tmp_path, kr_plan_di
             json={**kr_plan_dict, "plan_id": f"{kr_plan_dict['plan_id']}_new"},
         )
         assert reused.status_code == 409
+        assert not (tmp_path / "experiments" / "KR_compare_002").exists()
 
         stored = app.state.repository.get_plan(kr_plan_dict["plan_id"])
         assert "123456" not in stored["payload"]
@@ -153,6 +154,10 @@ def test_portfolio_experiment_uses_one_time_approval_and_three_cohorts(
         )
         assert status.status_code == 200
         assert len(status.json()["cohorts"]) == 3
+        stored_experiment = app.state.repository.get_portfolio_experiment(
+            "KR_compare_001"
+        )
+        assert stored_experiment["config_payload"]
 
         reused = client.post(
             "/v1/gpt-actions/experiments",

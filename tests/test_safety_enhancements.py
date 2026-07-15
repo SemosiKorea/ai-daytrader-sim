@@ -137,6 +137,74 @@ def test_stop_uses_bid_and_gap_waits_for_emergency_exit(tmp_path) -> None:
     assert json.loads(sell["payload"])["price"] == 98.0
 
 
+def test_force_close_rejects_stale_cached_quote(tmp_path) -> None:
+    repository = Repository(tmp_path / "force-close.db")
+    broker = PaperBroker(repository, {"US": CostConfig(1_500, 0, 0, 0, 0)})
+    engine = TradingEngine(repository, broker)
+    now = datetime.now(UTC)
+    order, _ = broker.submit_entry("US_plan_force", candidate(), tick(now))
+    assert order
+    broker.process_pending(tick(now + timedelta(milliseconds=400)))
+    stale = tick(now - timedelta(seconds=10))
+    engine.latest_ticks[(Market.US, "NVDA")] = stale
+
+    result = engine.force_close_market(Market.US, now=now)
+
+    assert result["unpriced_symbols"] == ["NVDA"]
+    assert "NVDA" in broker.portfolios[Market.US].positions
+
+
+def test_performance_drawdown_includes_open_position_equity(tmp_path) -> None:
+    repository = Repository(tmp_path / "equity.db")
+    broker = PaperBroker(repository, {"US": CostConfig(1_500, 0, 0, 0, 0)})
+    now = datetime.now(UTC)
+    order, _ = broker.submit_entry("US_plan_equity", candidate(), tick(now))
+    assert order
+    broker.process_pending(tick(now + timedelta(milliseconds=400)))
+
+    broker.on_tick(
+        tick(now + timedelta(seconds=1), price=90.1, bid=90.0, ask=90.1)
+    )
+
+    performance = broker.performance(Market.US)
+    assert performance["closed_trades"] == 0
+    assert performance["net_pnl"] < 0
+    assert performance["max_drawdown_pct"] > 0
+
+
+def test_take_profit_exit_uses_bid_size_and_partial_fill_state(tmp_path) -> None:
+    repository = Repository(tmp_path / "partial-exit.db")
+    broker = PaperBroker(repository, {"US": CostConfig(1_500, 0, 0, 0, 0)})
+    now = datetime.now(UTC)
+    order, _ = broker.submit_entry("US_plan_partial_exit", candidate(), tick(now))
+    assert order
+    broker.process_pending(tick(now + timedelta(milliseconds=400), ask_size=100))
+    assert broker.portfolios[Market.US].positions["NVDA"].remaining == 5
+
+    broker.on_tick(
+        tick(now + timedelta(seconds=1), price=102.1, bid=102, ask=102.1)
+    )
+    broker.on_tick(
+        tick(
+            now + timedelta(seconds=1.4),
+            price=102.1,
+            bid=102,
+            ask=102.1,
+            bid_size=1,
+        )
+    )
+
+    position = broker.portfolios[Market.US].positions["NVDA"]
+    assert position.remaining == 4
+    assert position.exit_remaining_quantity == 2
+    states = [
+        json.loads(event["payload"])["state"]
+        for event in repository.recent_events(20)
+        if event["event_type"] == "ORDER_STATE_CHANGED"
+    ]
+    assert OrderState.PARTIALLY_FILLED.value in states
+
+
 def test_sequence_and_crossed_quotes_are_rejected(tmp_path) -> None:
     repository = Repository(tmp_path / "feed.db")
     broker = PaperBroker(repository, {"US": CostConfig(1_500, 0, 0, 0, 0)})
