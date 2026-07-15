@@ -289,10 +289,8 @@ class IndicatorCalculator:
     def _sessions(self) -> list[date]:
         return sorted({self._bar_date(bar) for bar in self.completed})
 
-    def _previous_session_bars(self) -> list[MinuteBar]:
-        if self.session_date is None:
-            return []
-        prior = [value for value in self._sessions() if value < self.session_date]
+    def _previous_session_bars(self, reference_date: date) -> list[MinuteBar]:
+        prior = [value for value in self._sessions() if value < reference_date]
         if not prior:
             return []
         previous_date = prior[-1]
@@ -371,6 +369,12 @@ class IndicatorCalculator:
             self.session_volume > 0,
             local,
         )
+        add(
+            "regular_open_price",
+            self.first_trade,
+            self.session_date == local.date() and self.first_trade is not None,
+            local,
+        )
         add("ema_9_1m_regular", _ema(closes, 9), len(closes) >= 9, last_bar_at)
         add("ema_20_1m_regular", _ema(closes, 20), len(closes) >= 20, last_bar_at)
         add("ema_50_1m_regular", _ema(closes, 50), len(closes) >= 50, last_bar_at)
@@ -401,7 +405,7 @@ class IndicatorCalculator:
             add(f"opening_range_{minutes}_high", high, range_ready, generated_at)
             add(f"opening_range_{minutes}_low", low, range_ready, generated_at)
 
-        previous = self._previous_session_bars()
+        previous = self._previous_session_bars(local.date())
         previous_at = previous[-1].end if previous else local
         add("previous_open", previous[0].open if previous else None, bool(previous), previous_at)
         add(

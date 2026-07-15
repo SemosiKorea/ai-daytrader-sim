@@ -65,6 +65,9 @@ def test_decodes_domestic_quote_and_trade() -> None:
                 "ASKP1": "70000",
                 "BIDP_RSQN1": "120",
                 "ASKP_RSQN1": "80",
+                "ANTC_CNPR": "70100",
+                "ANTC_VOL": "15000",
+                "ANTC_CNTG_PRDY_CTRT": "1.59",
             },
         ),
         received,
@@ -89,6 +92,8 @@ def test_decodes_domestic_quote_and_trade() -> None:
     assert isinstance(quote, RawQuote)
     assert quote.bid == 69_900
     assert quote.ask_size == 80
+    assert quote.indicative_price == 70_100
+    assert quote.indicative_volume == 15_000
     assert isinstance(trade, RawTrade)
     assert trade.last == 70_000
     assert trade.size == 10
@@ -143,6 +148,7 @@ def test_decodes_overseas_quote_and_trade() -> None:
 @pytest.mark.asyncio
 async def test_bridge_posts_a_schema_valid_enriched_tick(tmp_path) -> None:
     settings = EnrichedFeedSettings(
+        _env_file=None,
         database_path=tmp_path / "daytrader.db",
         feed_history_path=tmp_path / "history.db",
         market_data_bearer="m" * 32,
@@ -186,6 +192,7 @@ async def test_bridge_posts_a_schema_valid_enriched_tick(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_bridge_does_not_join_records_across_reconnections(tmp_path) -> None:
     settings = EnrichedFeedSettings(
+        _env_file=None,
         database_path=tmp_path / "daytrader.db",
         feed_history_path=tmp_path / "history.db",
         market_data_bearer="m" * 32,
@@ -219,3 +226,114 @@ async def test_bridge_does_not_join_records_across_reconnections(tmp_path) -> No
     await bridge.on_record(trade, at, "connection-new")
 
     assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_bridge_keeps_premarket_separate_from_regular_indicators(tmp_path) -> None:
+    settings = EnrichedFeedSettings(
+        _env_file=None,
+        database_path=tmp_path / "daytrader.db",
+        feed_history_path=tmp_path / "history.db",
+        market_data_bearer="m" * 32,
+        kis_app_key="key",
+        kis_app_secret="secret",
+        feed_target_url="http://feed.test/v1/market-data/ticks",
+    )
+    bridge = EnrichedFeedBridge(settings)
+    requests: list[dict] = []
+
+    class FakeHTTP:
+        async def post(self, url, *, headers, json):
+            requests.append(json)
+
+            class Response:
+                status_code = 202
+                text = ""
+
+            return Response()
+
+        async def aclose(self):
+            return None
+
+    await bridge.http.aclose()
+    bridge.http = FakeHTTP()
+    at = datetime(2026, 7, 15, 23, 45, tzinfo=UTC)  # 08:45 KST
+    await bridge.on_record(
+        RawQuote(Market.KR, "005930", at, 69_900, 70_000, 120, 80),
+        at,
+        "connection-1",
+    )
+    await bridge.on_record(
+        RawTrade(Market.KR, "005930", at, 69_950, 10, 1000),
+        at,
+        "connection-1",
+    )
+
+    assert requests[0]["session"] == "premarket"
+    assert requests[0]["indicator_ready"]["premarket_vwap"] is True
+    assert requests[0]["indicator_ready"]["vwap_regular"] is False
+
+
+@pytest.mark.asyncio
+async def test_bridge_emits_kr_indicative_snapshot_without_trade(tmp_path) -> None:
+    settings = EnrichedFeedSettings(
+        _env_file=None,
+        database_path=tmp_path / "daytrader.db",
+        feed_history_path=tmp_path / "history.db",
+        market_data_bearer="m" * 32,
+        feed_target_url="http://feed.test/v1/market-data/ticks",
+    )
+    bridge = EnrichedFeedBridge(settings)
+    requests: list[dict] = []
+
+    class FakeHTTP:
+        async def post(self, url, *, headers, json):
+            requests.append(json)
+
+            class Response:
+                status_code = 202
+                text = ""
+
+            return Response()
+
+        async def aclose(self):
+            return None
+
+    await bridge.http.aclose()
+    bridge.http = FakeHTTP()
+    at = datetime(2026, 7, 15, 23, 45, tzinfo=UTC)
+    quote = RawQuote(
+        Market.KR,
+        "005930",
+        at,
+        69_900,
+        70_000,
+        120,
+        80,
+        indicative_price=69_950,
+        indicative_volume=15_000,
+        indicative_change_rate=1.38,
+    )
+
+    await bridge.on_record(quote, at, "connection-1")
+
+    assert requests[0]["data_source"] == "KIS_WEBSOCKET_INDICATIVE"
+    assert requests[0]["last"] == 69_950
+    assert requests[0]["indicators"]["premarket_volume"] == 15_000
+    assert requests[0]["indicator_ready"]["premarket_gap_pct"] is True
+
+
+def test_bridge_subscribes_active_market_universe_before_approval(tmp_path) -> None:
+    settings = EnrichedFeedSettings(
+        _env_file=None,
+        database_path=tmp_path / "daytrader.db",
+        feed_history_path=tmp_path / "history.db",
+        market_data_bearer="m" * 32,
+    )
+    bridge = EnrichedFeedBridge(settings)
+    now = datetime(2026, 7, 15, 23, 45, tzinfo=UTC)  # KR premarket scan window
+    symbols = bridge.feed_symbols(now)
+
+    assert FeedSymbol(Market.KR, "005930", "KRX") in symbols
+    assert any(item.reference and item.market == Market.KR for item in symbols)
+    assert len(build_subscriptions(symbols)) <= 40

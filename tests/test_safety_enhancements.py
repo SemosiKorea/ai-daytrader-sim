@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime, timedelta
 
 from daytrader.broker import PaperBroker
 from daytrader.config import CostConfig
-from daytrader.engine import TradingEngine
+from daytrader.engine import FeedState, TradingEngine
 from daytrader.market_clock import force_exit_at
 from daytrader.models import (
     CandidatePlan,
@@ -14,6 +14,7 @@ from daytrader.models import (
     OrderState,
     Predicate,
     RuleGroup,
+    TradePlan,
 )
 from daytrader.repository import Repository
 from daytrader.rules import CrossDebounceState, evaluate_group
@@ -219,3 +220,63 @@ def test_us_early_close_uses_official_calendar() -> None:
     exit_at = force_exit_at(Market.US, date(2026, 11, 27))
     assert exit_at.hour == 12
     assert exit_at.minute == 50
+
+
+def _plan_with(candidate_plan: CandidatePlan, at: datetime) -> TradePlan:
+    return TradePlan(
+        plan_id="US_guard_plan_001",
+        market=Market.US,
+        trade_date=at.date(),
+        expires_at=at + timedelta(hours=8),
+        approval_nonce="000000",
+        approved_symbols=[candidate_plan],
+    )
+
+
+def test_opening_deviation_persistently_blocks_candidate(tmp_path) -> None:
+    repository = Repository(tmp_path / "guard.db")
+    broker = PaperBroker(repository, {"US": CostConfig(1_500, 0, 0, 0, 0)})
+    engine = TradingEngine(repository, broker)
+    at = datetime.now(UTC)
+    guarded = CandidatePlan.model_validate(
+        {
+            **candidate().model_dump(),
+            "premarket_guard": {
+                "reference_price": 100,
+                "max_open_deviation_pct": 1,
+            },
+        }
+    )
+    plan = _plan_with(guarded, at)
+    current = tick(
+        at,
+        price=102,
+        indicators={"regular_open_price": 102.0},
+        indicator_ready={"regular_open_price": True},
+        indicator_timestamps={"regular_open_price": at},
+    )
+
+    reasons = engine._premarket_guard_reasons(plan, guarded, current)
+
+    assert reasons == ["OPEN_DEVIATION_EXCEEDED"]
+    state = repository.candidate_guard_state(plan.plan_id, guarded.symbol)
+    assert state and state["reason"] == "OPEN_DEVIATION_EXCEEDED"
+    assert engine._premarket_guard_reasons(plan, guarded, current)[0].startswith(
+        "CANDIDATE_RISK_BLOCKED"
+    )
+
+
+def test_engine_does_not_submit_when_ask_exceeds_maximum_limit(tmp_path) -> None:
+    repository = Repository(tmp_path / "limit.db")
+    broker = PaperBroker(repository, {"US": CostConfig(1_500, 0, 0, 0, 0)})
+    engine = TradingEngine(repository, broker)
+    at = datetime(2026, 7, 16, 10, 0, tzinfo=UTC)
+    plan = _plan_with(candidate(), at)
+    current = tick(at, price=100, bid=100, ask=100.1)
+    feed = FeedState(at, at, 1, "test-feed", "regular")
+
+    engine._try_entry(plan, candidate(), current, feed)
+
+    assert broker.portfolios[Market.US].pending_orders == {}
+    rejection = repository.recent_events(1)[0]
+    assert "MAX_BUY_LIMIT_EXCEEDED" in json.loads(rejection["payload"])["reasons"]

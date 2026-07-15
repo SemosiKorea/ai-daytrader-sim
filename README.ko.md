@@ -8,13 +8,15 @@ KIS 주문 기록 게이트웨이: [`docs/KIS_ORDER_GATEWAY.ko.md`](docs/KIS_ORD
 
 다음 흐름을 위한 독립형 가상매매 전용 프로그램입니다.
 
-1. Custom GPT가 한국 또는 미국 AI·반도체 종목의 당일 단타 계획을 제안합니다.
-2. 사용자가 계획을 검토한 후 텔레그램 일회용 코드로 명시적으로 승인합니다.
-3. GPT Action이 승인된 구조화 계획을 이 서비스로 전송합니다.
-4. 프로그램이 결정론적 검증을 거쳐 해당 시장의 당일 계획만 활성화합니다.
-5. 읽기 전용 KIS 시세 또는 인증된 확장 시세 피드로 가상 체결을 실행합니다.
-6. 손절, 익절, 위험 제한, 장 마감 청산은 LLM이 아니라 프로그램 코드가 수행합니다.
-7. 주문 결정은 KIS 요청 형식으로 변환해 로컬 원장에만 기록합니다.
+1. 시세 피드가 승인 전에도 현재 거래시간대의 AI·반도체 유니버스를 구독합니다.
+2. Custom GPT가 읽기 전용 Action으로 장전 후보를 조회하고 당일 계획을 제안합니다.
+3. 한국은 09:10 KST, 미국은 09:40 ET 이후 정규장 거래량·스프레드·VWAP을 재확인합니다.
+4. 사용자가 계획을 검토한 후 텔레그램 일회용 코드로 명시적으로 승인합니다.
+5. GPT Action이 승인된 구조화 계획을 이 서비스로 전송합니다.
+6. 프로그램이 결정론적 검증을 거쳐 해당 시장의 당일 계획만 활성화합니다.
+7. 읽기 전용 KIS 시세 또는 인증된 확장 시세 피드로 가상 체결을 실행합니다.
+8. 손절, 익절, 위험 제한, 장 마감 청산은 LLM이 아니라 프로그램 코드가 수행합니다.
+9. 주문 결정은 KIS 요청 형식으로 변환해 로컬 원장에만 기록합니다.
 
 이 프로젝트는 OpenAI API 키를 사용하지 않습니다. Custom GPT는 ChatGPT에서
 동작하며, 사용자의 승인 이후 HTTPS Action을 호출합니다. ChatGPT와 GPT 사용
@@ -45,7 +47,7 @@ KIS 주문 기록 게이트웨이: [`docs/KIS_ORDER_GATEWAY.ko.md`](docs/KIS_ORD
 ## 설치
 
 필요 환경은 macOS, `uv`, Python 3.11 이상, KIS Open API 시세 조회 인증정보이며,
-텔레그램 봇과 Cloudflare Tunnel은 선택 사항입니다.
+텔레그램 봇과 ngrok은 선택 사항입니다.
 
 ```bash
 git clone https://github.com/SemosiKorea/ai-daytrader-sim.git
@@ -146,6 +148,13 @@ LULD·기업행동 상태도 제공되지 않으므로 실제 운용 수준의 �
 Custom GPT는 그때 GPT Action으로 계획을 등록합니다. 단순한 계획 논의나
 “괜찮아 보인다”라는 표현만으로는 Action을 호출하면 안 됩니다.
 
+Custom GPT는 계획 전에 `GET /v1/gpt-actions/candidates`를 호출합니다. 한국 장전
+후보 창은 08:40부터, 미국 장전 후보 창은 정규장 45분 전부터 열립니다. 정규장
+확인은 각각 09:10 KST와 09:40 ET부터 가능합니다. 장전 계획의 기준가격 대비
+정규장 시가가 허용 범위를 벗어나면 종목은 당일 `RISK_BLOCKED`로 영구 차단되며,
+정규장 상대 거래량·스프레드·VWAP 확인 전이나 ask가 최대 지정가보다 높을 때는
+진입 주문 자체를 만들지 않습니다.
+
 관리자 API로 승인코드를 수동 발급하여 테스트할 수도 있습니다.
 
 ```bash
@@ -159,23 +168,27 @@ curl -X POST http://127.0.0.1:8787/v1/admin/nonces \
 전송할 수 있습니다. `samples/kr_plan.json`은 스키마 설명용이며 현재 종목
 추천이 아닙니다.
 
-## Custom GPT 및 Cloudflare 설정
+## Custom GPT 및 ngrok 설정
 
 1. Custom GPT를 만들고 `docs/CUSTOM_GPT_INSTRUCTIONS.ko.md` 내용을 GPT의
    Instructions 항목에 붙여 넣습니다.
-2. Cloudflare Tunnel을 localhost에 연결합니다. 제공된 Ingress 예시는
-   `/v1/gpt-actions/*`만 외부에 공개합니다. 관리자, 대시보드, 포트폴리오 및
-   시세 입력 경로는 로컬에 남습니다.
-3. `gpt_action_openapi.yaml`의 `https://trade.example.com`을 실제 주소로
+2. ngrok을 설치하고 계정 Authtoken을 맥에 등록한 다음
+   `deploy/ngrok-traffic-policy.yml` 정책과 함께 실행합니다. 이 정책은
+   `/v1/gpt-actions/*`만 외부에 공개하며 관리자, 대시보드, 포트폴리오 및
+   시세 입력 경로는 로컬에 남깁니다.
+3. `gpt_action_openapi.yaml`의 ngrok 주소 자리표시자를 실제 주소로
    변경한 후 Action으로 가져옵니다. 인증에는 `.env`의
    `GPT_ACTION_BEARER`와 동일한 Bearer 또는 API 키를 설정합니다.
 4. 새로운 OTP로 시험하고 응답 코드 `201`, 계획 상태 및 Content Hash가
    올바른지 확인합니다.
 
-`deploy/`의 두 launchd 템플릿으로 API와 피드를 계속 실행할 수 있습니다.
-`~/Library/LaunchAgents`에 설치하기 전에 모든 절대경로 자리표시자를 실제
-경로로 바꾸십시오. Cloudflared는 제한된 Ingress 설정을 사용해 별도의
-Launch Agent로 실행하는 것을 권장합니다.
+`deploy/`의 launchd 템플릿으로 API, 피드 및 ngrok을 계속 실행할 수 있습니다.
+API와 피드 템플릿은 `~/Library/LaunchAgents`에 설치하기 전에 모든 절대경로
+자리표시자를 실제 경로로 바꾸거나 `scripts/install_runtime_launch_agents.sh`로
+두 LaunchAgent를 자동 설치하십시오. ngrok 토큰 등록 후에는
+`scripts/install_ngrok_launch_agent.sh`가 ngrok LaunchAgent를 자동 설치합니다.
+전체 설정과 검증 절차는 [`docs/NGROK_SETUP.ko.md`](docs/NGROK_SETUP.ko.md)를
+참고하십시오.
 
 ## 매매 규칙과 가상 체결
 

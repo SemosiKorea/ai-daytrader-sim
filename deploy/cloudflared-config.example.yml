@@ -1,9 +1,0 @@
-tunnel: YOUR_TUNNEL_ID
-credentials-file: /Users/YOU/.cloudflared/YOUR_TUNNEL_ID.json
-ingress:
-  - hostname: trade.example.com
-    path: /v1/gpt-actions/*
-    service: http://127.0.0.1:8787
-  - hostname: trade.example.com
-    service: http_status:404
-  - service: http_status:404

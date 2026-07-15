@@ -200,6 +200,69 @@ class TradingEngine:
         local_time = source.astimezone(MARKET_TZ[tick.market]).time().replace(tzinfo=None)
         return candidate.entry.start_time <= local_time <= candidate.entry.end_time
 
+    def _premarket_guard_reasons(
+        self, plan: TradePlan, candidate: CandidatePlan, tick: MarketTick
+    ) -> list[str]:
+        guard = candidate.premarket_guard
+        if guard is None:
+            return []
+        existing = self.repository.candidate_guard_state(plan.plan_id, candidate.symbol)
+        if existing:
+            return [f"CANDIDATE_RISK_BLOCKED:{existing['reason']}"]
+        if not tick.indicator_ready.get("regular_open_price", False):
+            return ["REGULAR_OPEN_NOT_READY"]
+        opening_price = float(tick.indicators["regular_open_price"])
+        deviation = abs(opening_price - guard.reference_price) / guard.reference_price * 100
+        if deviation > guard.max_open_deviation_pct:
+            payload = {
+                "reference_price": guard.reference_price,
+                "regular_open_price": opening_price,
+                "open_deviation_pct": deviation,
+                "max_open_deviation_pct": guard.max_open_deviation_pct,
+            }
+            self.repository.block_candidate(
+                plan.plan_id,
+                candidate.symbol,
+                tick.market,
+                "OPEN_DEVIATION_EXCEEDED",
+                payload,
+            )
+            self.repository.add_event(
+                "CANDIDATE_RISK_BLOCKED",
+                tick.market,
+                candidate.symbol,
+                plan.plan_id,
+                {"reason": "OPEN_DEVIATION_EXCEEDED", **payload},
+            )
+            blocked = {
+                state["symbol"]
+                for state in self.repository.candidate_guard_states(plan.plan_id)
+            }
+            if blocked.issuperset({item.symbol for item in plan.approved_symbols}):
+                self.repository.set_plan_status(plan.plan_id, PlanStatus.RISK_BLOCKED)
+            return ["OPEN_DEVIATION_EXCEEDED"]
+        reasons: list[str] = []
+        spread = (tick.ask - tick.bid) / tick.last * 100
+        if spread > guard.max_spread_pct:
+            reasons.append("REGULAR_SPREAD_CONFIRMATION_FAILED")
+        relative_name = "relative_volume_cumulative_20d_same_time_regular"
+        if not tick.indicator_ready.get(relative_name, False):
+            reasons.append("REGULAR_RELATIVE_VOLUME_NOT_READY")
+        elif float(tick.indicators[relative_name]) < guard.relative_volume_min:
+            reasons.append("REGULAR_RELATIVE_VOLUME_TOO_LOW")
+        if guard.require_above_vwap:
+            if not tick.indicator_ready.get("vwap_regular", False):
+                reasons.append("REGULAR_VWAP_NOT_READY")
+            elif tick.last <= float(tick.indicators["vwap_regular"]):
+                reasons.append("PRICE_NOT_ABOVE_REGULAR_VWAP")
+        if guard.require_market_above_vwap:
+            market_name = "market_above_vwap_regular"
+            if not tick.indicator_ready.get(market_name, False):
+                reasons.append("MARKET_VWAP_NOT_READY")
+            elif not bool(tick.indicators[market_name]):
+                reasons.append("MARKET_NOT_ABOVE_VWAP")
+        return reasons
+
     def _try_entry(
         self, plan: TradePlan, candidate: CandidatePlan, tick: MarketTick, feed: FeedState
     ) -> None:
@@ -232,6 +295,9 @@ class TradingEngine:
             reasons.append("SPREAD_TOO_WIDE")
         if candidate.strategy_type == "rules" and tick.last < candidate.entry.trigger_price:
             reasons.append("TRIGGER_NOT_REACHED")
+        if tick.ask > candidate.entry.limit_price:
+            reasons.append("MAX_BUY_LIMIT_EXCEEDED")
+        reasons.extend(self._premarket_guard_reasons(plan, candidate, tick))
         reasons.extend(self._indicators_ready(candidate, tick))
         if reasons:
             self._log_rejection(tick, plan.plan_id, reasons)
@@ -380,7 +446,10 @@ class TradingEngine:
         local_date = (tick.source_timestamp or tick.timestamp).astimezone(
             MARKET_TZ[tick.market]
         ).date()
+        self.repository.save_market_snapshot(tick, local_date)
         plans = self.repository.active_plans(tick.market, local_date)
+        if tick.session != "regular":
+            return {"accepted": True, "action": "SNAPSHOT_RECORDED", "session": tick.session}
         if feed.context_reset:
             for plan in plans:
                 for candidate in plan.approved_symbols:

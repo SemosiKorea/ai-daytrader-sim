@@ -1,11 +1,37 @@
 openapi: 3.1.0
 info:
   title: AI Day Trader Plan Approval
-  version: 2.1.0
-  description: Registers an explicitly user-approved plan for paper trading only.
+  version: 2.2.0
+  description: Reads fresh AI/semiconductor candidates and registers explicitly approved paper plans only.
 servers:
-  - url: https://trade.example.com
+  - url: https://evict-smell-chug.ngrok-free.dev
 paths:
+  /v1/gpt-actions/candidates:
+    get:
+      operationId: getDayTradeCandidates
+      summary: Read the current premarket shortlist or regular-session confirmations.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: market
+          required: true
+          schema: {type: string, enum: [KR, US]}
+        - in: query
+          name: phase
+          required: false
+          schema: {type: string, enum: [auto, premarket, regular], default: auto}
+        - in: query
+          name: limit
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 10, default: 5}
+      responses:
+        '200':
+          description: Read-only candidate ranking. It never arms a plan.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CandidateScanResponse'
   /v1/gpt-actions/plans:
     post:
       operationId: registerApprovedPaperTradePlan
@@ -43,7 +69,8 @@ paths:
           description: Current plan status.
           content:
             application/json:
-              schema: {type: object, additionalProperties: true}
+              schema:
+                $ref: '#/components/schemas/PlanStatusResponse'
 components:
   securitySchemes:
     bearerAuth:
@@ -102,6 +129,7 @@ components:
         force_exit_time: {type: string, format: time}
         exit_policy: {$ref: '#/components/schemas/ExitPolicy'}
         pullback_rebreak: {$ref: '#/components/schemas/PullbackRebreak'}
+        premarket_guard: {$ref: '#/components/schemas/PremarketGuard'}
     Entry:
       type: object
       additionalProperties: false
@@ -126,7 +154,49 @@ components:
         groups:
           type: array
           maxItems: 4
-          items: {$ref: '#/components/schemas/RuleGroup'}
+          items: {$ref: '#/components/schemas/RuleGroupLevel2'}
+    RuleGroupLevel2:
+      type: object
+      additionalProperties: false
+      required: [mode, predicates, groups]
+      properties:
+        mode: {type: string, enum: [all, any]}
+        predicates:
+          type: array
+          maxItems: 12
+          items: {$ref: '#/components/schemas/Predicate'}
+        groups:
+          type: array
+          maxItems: 4
+          items: {$ref: '#/components/schemas/RuleGroupLevel3'}
+    RuleGroupLevel3:
+      type: object
+      additionalProperties: false
+      required: [mode, predicates, groups]
+      properties:
+        mode: {type: string, enum: [all, any]}
+        predicates:
+          type: array
+          maxItems: 12
+          items: {$ref: '#/components/schemas/Predicate'}
+        groups:
+          type: array
+          maxItems: 4
+          items: {$ref: '#/components/schemas/RuleGroupLevel4'}
+    RuleGroupLevel4:
+      type: object
+      additionalProperties: false
+      required: [mode, predicates, groups]
+      properties:
+        mode: {type: string, enum: [all, any]}
+        predicates:
+          type: array
+          maxItems: 12
+          items: {$ref: '#/components/schemas/Predicate'}
+        groups:
+          type: array
+          maxItems: 0
+          items: {type: string}
     Predicate:
       type: object
       additionalProperties: false
@@ -134,7 +204,9 @@ components:
       properties:
         indicator:
           type: string
-          enum: [last, bid, ask, spread_pct, previous_open, previous_high,
+          enum: [last, bid, ask, spread_pct, regular_open_price, premarket_open,
+            premarket_high, premarket_low, premarket_last, premarket_vwap,
+            premarket_volume, premarket_gap_pct, previous_open, previous_high,
             previous_low, previous_close, opening_range_5_high, opening_range_5_low,
             opening_range_10_high, opening_range_10_low, opening_range_15_high,
             opening_range_15_low, vwap_regular, atr_14_1m_regular,
@@ -177,11 +249,93 @@ components:
         rebreak_relative_volume_min: {type: number, minimum: 0.1, maximum: 10, default: 1.3}
         spread_pct_max: {type: number, exclusiveMinimum: 0, maximum: 2, default: 0.15}
         require_market_above_vwap: {type: boolean, default: true}
+    PremarketGuard:
+      type: object
+      additionalProperties: false
+      required: [reference_price]
+      properties:
+        reference_price: {type: number, exclusiveMinimum: 0}
+        max_open_deviation_pct: {type: number, exclusiveMinimum: 0, maximum: 10, default: 1}
+        max_spread_pct: {type: number, exclusiveMinimum: 0, maximum: 2, default: 0.15}
+        relative_volume_min: {type: number, exclusiveMinimum: 0, maximum: 10, default: 1.3}
+        require_above_vwap: {type: boolean, default: true}
+        require_market_above_vwap: {type: boolean, default: true}
+    CandidateScanResponse:
+      type: object
+      additionalProperties: false
+      required: [market, trade_date, phase, status, as_of, window, execution_note,
+        candidates, exclusions]
+      properties:
+        market: {type: string, enum: [KR, US]}
+        trade_date: {type: string, format: date}
+        phase: {type: string, enum: [premarket, regular, closed]}
+        status: {type: string}
+        as_of: {type: string, format: date-time}
+        window:
+          type: object
+          additionalProperties: true
+          properties:
+            status: {type: string}
+            phase: {type: string}
+            premarket_scan_start: {type: string, format: date-time}
+            candidate_selection_end: {type: string, format: date-time}
+            regular_open: {type: string, format: date-time}
+            regular_confirmation_at: {type: string, format: date-time}
+            regular_close: {type: string, format: date-time}
+        execution_note: {type: string}
+        candidates:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            required: [symbol, name, exchange, score, as_of, session, quote_scope,
+              last, bid, ask, spread_pct, indicators, premarket_guard_template]
+            properties:
+              symbol: {type: string}
+              name: {type: string}
+              exchange: {type: string}
+              score: {type: number}
+              as_of: {type: string, format: date-time}
+              session: {type: string}
+              quote_scope: {type: string}
+              last: {type: number}
+              bid: {type: number}
+              ask: {type: number}
+              spread_pct: {type: number}
+              bid_size: {type: integer}
+              ask_size: {type: integer}
+              indicators:
+                type: object
+                additionalProperties: true
+                properties: {}
+              premarket_guard_template: {$ref: '#/components/schemas/PremarketGuard'}
+        exclusions:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [symbol, reasons]
+            properties:
+              symbol: {type: string}
+              reasons: {type: array, items: {type: string}}
     PlanReceipt:
       type: object
+      additionalProperties: false
       required: [plan_id, status, content_hash, message]
       properties:
         plan_id: {type: string}
         status: {type: string}
         content_hash: {type: string}
         message: {type: string}
+    PlanStatusResponse:
+      type: object
+      required: [plan_id, plan_version, market, trade_date, status, content_hash]
+      properties:
+        plan_id: {type: string}
+        plan_version: {type: integer}
+        market: {type: string, enum: [KR, US]}
+        trade_date: {type: string, format: date}
+        status:
+          type: string
+          enum: [VALIDATED, ARMED, RUNNING, COMPLETED, EXPIRED, REJECTED, CANCELLED, RISK_BLOCKED]
+        content_hash: {type: string}

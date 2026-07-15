@@ -1,0 +1,15 @@
+on_http_request:
+  - name: hide every non-GPT-Action route
+    expressions:
+      - "!req.url.path.startsWith('/v1/gpt-actions/')"
+    actions:
+      - type: deny
+        config:
+          status_code: 404
+  - name: allow only the HTTP methods used by the GPT Action
+    expressions:
+      - "req.method != 'GET' && req.method != 'POST'"
+    actions:
+      - type: deny
+        config:
+          status_code: 405

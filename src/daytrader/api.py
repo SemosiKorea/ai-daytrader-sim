@@ -4,6 +4,7 @@ import hmac
 import html
 import sqlite3
 from contextlib import asynccontextmanager
+from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -25,6 +26,7 @@ from .models import (
 from .notifications import TelegramNotifier
 from .repository import PlanConflictError, Repository
 from .scheduler import SessionScheduler
+from .scanner import CandidateScanner
 from .validator import PlanValidationError, validate_plan
 
 
@@ -54,6 +56,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
     session_scheduler = SessionScheduler(repository, engine, broker, notifier)
     quote_poller = None
+    candidate_scanner = CandidateScanner(repository, universe, settings)
     if settings.kis_poll_enabled:
         if not settings.kis_app_key or not settings.kis_app_secret:
             raise ValueError("KIS polling requires KIS_APP_KEY and KIS_APP_SECRET")
@@ -78,7 +81,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
 
     app = FastAPI(
         title="AI Day Trader Simulator",
-        version="0.5.0",
+        version="0.6.0",
         description="GPT-approved paper trading with record-only KIS order intents.",
         lifespan=lifespan,
     )
@@ -92,6 +95,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     app.state.notifier = notifier
     app.state.scheduler = session_scheduler
     app.state.quote_poller = quote_poller
+    app.state.candidate_scanner = candidate_scanner
 
     @app.middleware("http")
     async def reject_large_payload(request: Request, call_next):
@@ -170,6 +174,16 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
             message="approved plan is armed for paper trading",
         )
 
+    @app.get("/v1/gpt-actions/candidates")
+    async def candidate_shortlist(
+        market: Market,
+        phase: Literal["auto", "premarket", "regular"] = "auto",
+        limit: int = Query(default=5, ge=1, le=10),
+        authorization: str | None = Header(default=None),
+    ) -> dict:
+        _require(settings.gpt_action_bearer, authorization)
+        return candidate_scanner.scan(market, phase, limit)
+
     @app.get("/v1/gpt-actions/plans/{plan_id}/status")
     async def plan_status(
         plan_id: str, authorization: str | None = Header(default=None)
@@ -199,6 +213,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
             "content_hash": row["content_hash"],
             "recent_events": repository.plan_events(plan_id),
             "strategy_states": strategy_states,
+            "candidate_guards": repository.candidate_guard_states(plan_id),
         }
 
     @app.post("/v1/market-data/ticks", status_code=202)
