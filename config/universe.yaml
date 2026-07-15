@@ -1,0 +1,27 @@
+KR:
+  "005930": {name: "삼성전자", exchange: "KRX"}
+  "000660": {name: "SK하이닉스", exchange: "KRX"}
+  "042700": {name: "한미반도체", exchange: "KRX"}
+  "000990": {name: "DB하이텍", exchange: "KRX"}
+  "067310": {name: "하나마이크론", exchange: "KRX"}
+  "036540": {name: "SFA반도체", exchange: "KRX"}
+  "095340": {name: "ISC", exchange: "KRX"}
+  "403870": {name: "HPSP", exchange: "KRX"}
+  "036930": {name: "주성엔지니어링", exchange: "KRX"}
+  "240810": {name: "원익IPS", exchange: "KRX"}
+  "091160": {name: "KODEX 반도체", exchange: "KRX"}
+US:
+  NVDA: {name: "NVIDIA", exchange: "NASDAQ"}
+  AMD: {name: "Advanced Micro Devices", exchange: "NASDAQ"}
+  AVGO: {name: "Broadcom", exchange: "NASDAQ"}
+  MU: {name: "Micron Technology", exchange: "NASDAQ"}
+  ARM: {name: "Arm Holdings", exchange: "NASDAQ"}
+  MRVL: {name: "Marvell Technology", exchange: "NASDAQ"}
+  TSM: {name: "Taiwan Semiconductor ADR", exchange: "NYSE"}
+  ASML: {name: "ASML Holding ADR", exchange: "NASDAQ"}
+  AMAT: {name: "Applied Materials", exchange: "NASDAQ"}
+  LRCX: {name: "Lam Research", exchange: "NASDAQ"}
+  QCOM: {name: "Qualcomm", exchange: "NASDAQ"}
+  INTC: {name: "Intel", exchange: "NASDAQ"}
+  SMH: {name: "VanEck Semiconductor ETF", exchange: "NASDAQ"}
+  SOXX: {name: "iShares Semiconductor ETF", exchange: "NASDAQ"}

@@ -1,0 +1,194 @@
+# AI 단타 가상매매 시뮬레이터
+
+보완사항 구현 대조표: [`docs/SAFETY_ENHANCEMENTS.ko.md`](docs/SAFETY_ENHANCEMENTS.ko.md)
+
+눌림목 전략: [`docs/PULLBACK_STRATEGY.ko.md`](docs/PULLBACK_STRATEGY.ko.md)
+
+다음 흐름을 위한 독립형 가상매매 전용 프로그램입니다.
+
+1. Custom GPT가 한국 또는 미국 AI·반도체 종목의 당일 단타 계획을 제안합니다.
+2. 사용자가 계획을 검토한 후 텔레그램 일회용 코드로 명시적으로 승인합니다.
+3. GPT Action이 승인된 구조화 계획을 이 서비스로 전송합니다.
+4. 프로그램이 결정론적 검증을 거쳐 해당 시장의 당일 계획만 활성화합니다.
+5. 읽기 전용 KIS 시세 또는 인증된 확장 시세 피드로 가상 체결을 실행합니다.
+6. 손절, 익절, 위험 제한, 장 마감 청산은 LLM이 아니라 프로그램 코드가 수행합니다.
+
+이 프로젝트는 OpenAI API 키를 사용하지 않습니다. Custom GPT는 ChatGPT에서
+동작하며, 사용자의 승인 이후 HTTPS Action을 호출합니다. ChatGPT와 GPT 사용
+가능 여부는 사용자의 ChatGPT 요금제 및 정책을 따릅니다. 이 프로그램은 투자
+자문을 제공하지 않으며 수익을 보장하지 않습니다.
+
+## 안전 경계
+
+- 유일한 체결 어댑터는 `PaperBroker`입니다.
+- `KISReadOnlyClient`는 시세 조회 GET 경로와 OAuth 토큰 발급만 허용합니다.
+- `place_order()`는 항상 `LiveOrderCapabilityDisabled` 예외를 발생시킵니다.
+- KIS 주문, 계좌, 잔고, Hashkey 및 주문 체결통보 호출은 구현되어 있지 않습니다.
+- 한국과 미국 시장은 각각 별도의 일회용 45분 승인코드가 필요합니다.
+- 시장별 하루 한 계획과 후보 최대 3개를 허용합니다. 미체결 진입 주문과
+  보유 포지션이 시장별 슬롯 하나를 함께 사용합니다.
+- 수량은 거래당 허용위험, 당일 총위험, 현금 및 고정 최대수량 중 가장 작은
+  값으로 계산합니다. 당일 총위험에는 실현손실, 보유 포지션 손절위험 및
+  미체결 주문 예정위험이 포함됩니다.
+- 강제청산은 공식 거래소 달력을 사용합니다. 한국은 공식 종료 15분 전,
+  미국은 조기폐장과 서머타임을 포함해 공식 종료 10분 전입니다.
+- 가상 포트폴리오, 계획, 해시 및 감사 로그는 SQLite WAL 모드로 저장됩니다.
+
+## 설치
+
+필요 환경은 macOS, `uv`, Python 3.11 이상, KIS Open API 시세 조회 인증정보이며,
+텔레그램 봇과 Cloudflare Tunnel은 선택 사항입니다.
+
+```bash
+git clone https://github.com/SemosiKorea/ai-daytrader-sim.git
+cd ai-daytrader-sim
+uv sync --extra dev
+cp .env.example .env
+```
+
+서로 다른 충분히 긴 무작위 Bearer Secret 세 개를 생성하여 `.env`에 입력하십시오.
+`.env`는 현재 사용자만 읽을 수 있도록 제한하고, KIS 및 텔레그램 인증정보를
+GPT 대화에 붙여 넣지 마십시오. 프로그램은 기본값, 중복값 또는 24자 미만의
+Bearer Secret이 설정되면 시작을 거부합니다.
+
+서비스가 거래계획을 승인하려면 `config/costs.yaml`의 두 시장
+`sell_tax_bps`에 현재 공식 KIS·거래소 비용 기준을 입력해야 합니다. 비용은
+변경될 수 있으므로 기본값을 의도적으로 `null`로 두었습니다. 임의의 값을
+입력하면 가상매매 결과가 왜곡될 수 있습니다.
+
+로컬 실행:
+
+```bash
+uv run daytrader-sim
+curl http://127.0.0.1:8787/healthz
+```
+
+이벤트 대시보드는 `ADMIN_BEARER`로 보호됩니다.
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_BEARER" http://127.0.0.1:8787/
+```
+
+## 시세 데이터 방식
+
+확장 피드의 정확한 계산 규약은
+[`docs/INDICATOR_CONTRACT.ko.md`](docs/INDICATOR_CONTRACT.ko.md)를 따릅니다.
+
+기본 방식은 인증된 Push 방식입니다. 별도의 로컬 시세 계산기가 3초 이내의
+최신 Tick과 계획에서 참조하는 기술지표를 전송합니다.
+
+```bash
+curl -X POST http://127.0.0.1:8787/v1/market-data/ticks \
+  -H "Authorization: Bearer $MARKET_DATA_BEARER" \
+  -H "Content-Type: application/json" \
+  -d '{"market":"US","symbol":"NVDA","timestamp":"2026-07-15T14:00:00Z",\
+       "source_timestamp":"2026-07-15T14:00:00Z",\
+       "received_timestamp":"2026-07-15T14:00:00.2Z","sequence_id":101,\
+       "connection_id":"feed-20260715-1","data_source":"verified-nbbo-feed",\
+       "session":"regular","market_status":"open","symbol_status":"trading",\
+       "luld_status":"normal",\
+       "quote_scope":"consolidated","last":180.0,"bid":179.99,"ask":180.01,\
+       "ask_size":25,"trade_size":100,"indicators":{"vwap_regular":179.4},\
+       "indicator_ready":{"vwap_regular":true},\
+       "indicator_timestamps":{"vwap_regular":"2026-07-15T14:00:00Z"}}'
+```
+
+내장된 KIS REST 시세 조회 보조 기능을 사용하려면 `KIS_POLL_ENABLED=true`로
+설정합니다. 이 기능은 활성화된 계획에 포함된 종목만 조회합니다. 가격과
+스프레드 정보는 제공하지만 VWAP, RSI, 시가 범위, 상대 거래량은 계산하지
+않습니다. 계획에서 참조한 지표가 Tick에 없으면 해당 조건은 거짓으로 처리되어
+진입하지 않습니다. 미국 시장 진입에는 통합호가임이 확인된
+`quote_scope=consolidated`가 필요합니다. REST 보조 기능의 호가 범위는 확인되지
+않은 것으로 처리되므로 이것만으로는 미국 종목을 가상 체결하지 않습니다.
+
+KIS 공식 문서는 실시간 시세가 필요할 때 WebSocket 사용을 권장합니다. 지연에
+민감한 가상매매를 수행하려면 충분히 테스트한 WebSocket 기반 확장 시세
+브리지를 사용하십시오.
+
+## 매일 승인 절차
+
+스케줄러는 거래소 영업일에 한국 시장 승인코드를 08:15 KST, 미국 시장
+승인코드를 08:45 ET에 전송합니다. 사용자는 Custom GPT에 당일 계획을 요청한
+후 모든 가격과 규칙을 검토하고, 승인 의사와 해당 시장의 OTP를 입력합니다.
+Custom GPT는 그때 GPT Action으로 계획을 등록합니다. 단순한 계획 논의나
+“괜찮아 보인다”라는 표현만으로는 Action을 호출하면 안 됩니다.
+
+관리자 API로 승인코드를 수동 발급하여 테스트할 수도 있습니다.
+
+```bash
+curl -X POST http://127.0.0.1:8787/v1/admin/nonces \
+  -H "Authorization: Bearer $ADMIN_BEARER" \
+  -H "Content-Type: application/json" \
+  -d '{"market":"KR","trade_date":"2026-07-15"}'
+```
+
+샘플 파일의 날짜, 만료 시각, OTP를 바꾼 후 `GPT_ACTION_BEARER`를 사용해
+전송할 수 있습니다. `samples/kr_plan.json`은 스키마 설명용이며 현재 종목
+추천이 아닙니다.
+
+## Custom GPT 및 Cloudflare 설정
+
+1. Custom GPT를 만들고 `docs/CUSTOM_GPT_INSTRUCTIONS.ko.md` 내용을 GPT의
+   Instructions 항목에 붙여 넣습니다.
+2. Cloudflare Tunnel을 localhost에 연결합니다. 제공된 Ingress 예시는
+   `/v1/gpt-actions/*`만 외부에 공개합니다. 관리자, 대시보드, 포트폴리오 및
+   시세 입력 경로는 로컬에 남습니다.
+3. `gpt_action_openapi.yaml`의 `https://trade.example.com`을 실제 주소로
+   변경한 후 Action으로 가져옵니다. 인증에는 `.env`의
+   `GPT_ACTION_BEARER`와 동일한 Bearer 또는 API 키를 설정합니다.
+4. 새로운 OTP로 시험하고 응답 코드 `201`, 계획 상태 및 Content Hash가
+   올바른지 확인합니다.
+
+`deploy/`의 launchd 템플릿으로 서비스를 계속 실행할 수 있습니다.
+`~/Library/LaunchAgents`에 설치하기 전에 모든 절대경로 자리표시자를 실제
+경로로 바꾸십시오. Cloudflared는 제한된 Ingress 설정을 사용해 별도의
+Launch Agent로 실행하는 것을 권장합니다.
+
+## 매매 규칙과 가상 체결
+
+후보의 `strategy_type`은 일반 DSL·가격 규칙을 사용하는 `rules`와 시간 순서를
+추적하는 `pullback_rebreak`를 지원합니다. 불리언 조건에는 `eq`, `ne`를 사용할
+수 있습니다. 눌림목 전략 상태와 계산값은 SQLite에 저장됩니다.
+
+- 유효한 진입 신호는 즉시 체결이 아니라 `ENTRY_PENDING` 주문을 만듭니다.
+  주문은 시장 슬롯을 예약하고 가상 지연 후 호가 잔량 범위에서만 부분체결되며,
+  제한시간이 지나면 잔여 수량이 취소됩니다. 최초 부분체결 때 진입 횟수를
+  차감합니다.
+- 수량은 위험예산 수량, 현금 수량, 최대 허용수량 중 최솟값입니다. 주문 제출
+  횟수와 실제 진입 횟수는 별도로 제한합니다.
+- 손절은 `last`가 아니라 실제 매도 가능한 `bid`로 트리거합니다. 급락으로
+  시장성 지정가 아래로 건너뛰면 `EXIT_PENDING` 상태에서 비상 제한시간을 기다린
+  후 다음 유효 bid로 청산합니다. 익절도 `bid >= target`일 때만 체결합니다.
+- 최대 지정가와 예상 비용·슬리피지·세금·보수적인 손절 체결가를 기준으로
+  손익비를 검증합니다.
+- 원천·수신 시각, 시퀀스, 세션, 호가 범위, crossed/locked 상태, 거래중단,
+  LULD 및 지표별 준비 상태와 생성 시각을 검사합니다.
+- 교차 조건에는 확인 Tick 수, 유지시간, 최소 돌파폭 및 재발동 대기시간을
+  설정할 수 있습니다. 연결·세션 변경이나 거래중단 복구 시 상태를 초기화합니다.
+- 최대 보유시간, 진행 부진 및 VWAP 이탈 청산을 지원합니다.
+- 모든 주문 상태, 체결, 취소, 데이터 거절 및 미진입 사유를 감사 로그에 남깁니다.
+
+허용 종목은 `config/universe.yaml`에 정의되어 있습니다. 명시적 가격 전용이 아닌
+빈 일반 규칙, 모순된 조건, 중복 익절가격, 모호한 지표명, 완성 전 시가 범위,
+휴장일, 잘못된 계획
+버전·시각도 거절합니다. 기업행동이 감지되면 해당 계획을 자동 무효화합니다.
+
+## 성과 평가
+
+`ADMIN_BEARER` 인증으로 `GET /v1/performance/KR` 또는
+`GET /v1/performance/US`를 호출합니다. 감사 로그에 저장된 청산 포지션을
+기준으로 거래 횟수, 순손익, Profit Factor 및 최대 낙폭을 계산합니다.
+
+목표 검증 기준은 두 시장 합산 최소 30거래 세션 및 50회 청산 거래, 순손익
+양수, Profit Factor 1.2 이상, MDD 5% 이하입니다. 가상매매 기준을 통과해도
+실제 매매에서 같은 성과가 나온다는 의미는 아닙니다.
+
+## 테스트
+
+```bash
+uv run ruff check .
+uv run pytest
+```
+
+테스트에는 스키마 및 위험 조건 거절, 일회용 승인, 교차 조건, 가상 체결,
+재시작 후 상태 복원, 오래된 Tick 거절 및 KIS 실제 주문 금지가 포함됩니다.

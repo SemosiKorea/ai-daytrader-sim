@@ -1,0 +1,44 @@
+KR:
+  initial_cash: 3000000
+  commission_bps_each_side: 5
+  slippage_bps_each_side: 5
+  sell_tax_bps: null  # Set from the current official KIS/exchange schedule before a session.
+  fx_bps_each_side: 0
+  trade_risk_pct: 0.4
+  daily_loss_limit_pct: 2.0
+  max_position_quantity: 1000
+  fill_latency_ms: 300
+  fill_timeout_sec: 5
+  allow_partial_fill: true
+  max_fill_quantity_per_tick: 100
+  volume_participation_pct: 10
+  max_order_submissions_per_day: 4
+  max_filled_entries_per_day: 2
+  consecutive_stop_limit: 2
+  stop_cooldown_minutes: 20
+  halt_resume_cooldown_seconds: 60
+  max_spread_pct: 1.0
+  max_tick_age_seconds: 3
+  indicator_max_age_seconds: 3
+US:
+  initial_cash: 1500
+  commission_bps_each_side: 10
+  slippage_bps_each_side: 5
+  sell_tax_bps: null  # Set current SEC/TAF-equivalent sell costs before a session.
+  fx_bps_each_side: 10
+  trade_risk_pct: 0.4
+  daily_loss_limit_pct: 2.0
+  max_position_quantity: 100
+  fill_latency_ms: 300
+  fill_timeout_sec: 5
+  allow_partial_fill: true
+  max_fill_quantity_per_tick: 25
+  volume_participation_pct: 10
+  max_order_submissions_per_day: 4
+  max_filled_entries_per_day: 2
+  consecutive_stop_limit: 2
+  stop_cooldown_minutes: 20
+  halt_resume_cooldown_seconds: 60
+  max_spread_pct: 1.0
+  max_tick_age_seconds: 3
+  indicator_max_age_seconds: 3

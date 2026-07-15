@@ -1,0 +1,49 @@
+{
+  "plan_id": "KR_20260715_demo",
+  "plan_version": 1,
+  "created_at": "2026-07-15T08:20:00+09:00",
+  "market": "KR",
+  "trade_date": "2026-07-15",
+  "expires_at": "2026-07-15T15:15:00+09:00",
+  "approval_nonce": "123456",
+  "approved_symbols": [
+    {
+      "symbol": "005930",
+      "exchange": "KRX",
+      "reason": "Schema example only; this is not a current recommendation.",
+      "strategy_type": "rules",
+      "entry": {
+        "trigger_price": 100000,
+        "limit_price": 100100,
+        "start_time": "09:10:00",
+        "end_time": "11:00:00",
+        "price_only": false,
+        "rules": {
+          "mode": "all",
+          "predicates": [
+            {"indicator": "spread_pct", "operator": "lte", "value": 0.15}
+          ],
+          "groups": []
+        }
+      },
+      "stop_loss": {
+        "price": 99000,
+        "execution_type": "marketable_limit",
+        "limit_offset_pct": 0.2,
+        "emergency_exit_after_sec": 2
+      },
+      "take_profit": [
+        {"price": 102000, "quantity_pct": 50},
+        {"price": 103000, "quantity_pct": 50}
+      ],
+      "exit_policy": {
+        "max_holding_minutes": 90,
+        "no_progress_exit_minutes": 30,
+        "no_progress_min_pct": 0.3,
+        "exit_if_below_vwap_sec": 60,
+        "move_stop_to_entry_after_tp1": false
+      },
+      "force_exit_time": "15:15:00"
+    }
+  ]
+}

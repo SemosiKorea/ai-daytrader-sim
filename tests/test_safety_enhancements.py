@@ -1,0 +1,221 @@
+from __future__ import annotations
+
+import json
+from datetime import UTC, date, datetime, timedelta
+
+from daytrader.broker import PaperBroker
+from daytrader.config import CostConfig
+from daytrader.engine import TradingEngine
+from daytrader.market_clock import force_exit_at
+from daytrader.models import (
+    CandidatePlan,
+    Market,
+    MarketTick,
+    OrderState,
+    Predicate,
+    RuleGroup,
+)
+from daytrader.repository import Repository
+from daytrader.rules import CrossDebounceState, evaluate_group
+
+
+def candidate(symbol: str = "NVDA") -> CandidatePlan:
+    return CandidatePlan.model_validate(
+        {
+            "symbol": symbol,
+            "exchange": "NASDAQ",
+            "reason": "A conservative state-machine test candidate.",
+            "entry": {
+                "trigger_price": 100,
+                "limit_price": 100,
+                "start_time": "09:40:00",
+                "end_time": "11:00:00",
+                "price_only": True,
+                "rules": {"mode": "all", "predicates": [], "groups": []},
+            },
+            "stop_loss": {
+                "price": 99,
+                "limit_offset_pct": 0.2,
+                "emergency_exit_after_sec": 2,
+            },
+            "take_profit": [
+                {"price": 102, "quantity_pct": 50},
+                {"price": 104, "quantity_pct": 50},
+            ],
+            "force_exit_time": "15:50:00",
+        }
+    )
+
+
+def tick(
+    at: datetime,
+    *,
+    price: float = 100,
+    bid: float | None = None,
+    ask: float | None = None,
+    ask_size: int = 10,
+    sequence: int | None = None,
+    symbol: str = "NVDA",
+    **updates,
+) -> MarketTick:
+    return MarketTick(
+        market=Market.US,
+        symbol=symbol,
+        timestamp=at,
+        source_timestamp=at,
+        received_timestamp=at,
+        sequence_id=sequence if sequence is not None else int(at.timestamp() * 1000),
+        connection_id="test-feed",
+        data_source="test",
+        quote_scope="consolidated",
+        session=updates.pop("session", "regular"),
+        market_status=updates.pop("market_status", "open"),
+        symbol_status=updates.pop("symbol_status", "trading"),
+        luld_status=updates.pop("luld_status", "normal"),
+        last=price,
+        bid=bid if bid is not None else price - 0.01,
+        ask=ask if ask is not None else price,
+        ask_size=ask_size,
+        trade_size=100,
+        **updates,
+    )
+
+
+def test_pending_order_reserves_slot_expires_and_is_idempotent(tmp_path) -> None:
+    repository = Repository(tmp_path / "orders.db")
+    broker = PaperBroker(repository, {"US": CostConfig(1_500, 0, 0, 0, 0)})
+    now = datetime.now(UTC)
+    order, reason = broker.submit_entry("US_plan_001", candidate(), tick(now))
+    assert order and reason is None
+
+    second, reason = broker.submit_entry(
+        "US_plan_002", candidate("AMD"), tick(now, symbol="AMD")
+    )
+    assert second is None
+    assert reason == "POSITION_SLOT_OCCUPIED"
+
+    broker.expire_pending(now + timedelta(seconds=6))
+    assert not broker.portfolios[Market.US].pending_orders
+    retry, reason = broker.submit_entry("US_plan_001", candidate(), tick(now + timedelta(seconds=7)))
+    assert retry is None
+    assert reason == "ORDER_ALREADY_SUBMITTED"
+    states = [
+        json.loads(event["payload"])["state"]
+        for event in repository.recent_events(20)
+        if event["event_type"] == "ORDER_STATE_CHANGED"
+    ]
+    assert OrderState.EXPIRED.value in states
+
+
+def test_stop_uses_bid_and_gap_waits_for_emergency_exit(tmp_path) -> None:
+    repository = Repository(tmp_path / "stop.db")
+    broker = PaperBroker(repository, {"US": CostConfig(1_500, 0, 0, 0, 0)})
+    now = datetime.now(UTC)
+    order, _ = broker.submit_entry("US_plan_stop", candidate(), tick(now))
+    assert order
+    broker.process_pending(tick(now + timedelta(milliseconds=400)))
+    position = broker.portfolios[Market.US].positions["NVDA"]
+
+    gap = tick(
+        now + timedelta(seconds=1), price=98.6, bid=98.5, ask=98.6, ask_size=100
+    )
+    broker.on_tick(gap)
+    assert position.exit_pending_at is not None
+    assert "NVDA" in broker.portfolios[Market.US].positions
+
+    emergency = tick(
+        now + timedelta(seconds=3.1), price=98.1, bid=98.0, ask=98.1, ask_size=100
+    )
+    broker.on_tick(emergency)
+    assert not broker.portfolios[Market.US].positions
+    sell = next(
+        event
+        for event in repository.recent_events(20)
+        if event["event_type"] == "PAPER_SELL_FILLED"
+    )
+    assert json.loads(sell["payload"])["price"] == 98.0
+
+
+def test_sequence_and_crossed_quotes_are_rejected(tmp_path) -> None:
+    repository = Repository(tmp_path / "feed.db")
+    broker = PaperBroker(repository, {"US": CostConfig(1_500, 0, 0, 0, 0)})
+    engine = TradingEngine(repository, broker)
+    now = datetime.now(UTC)
+    assert engine.process_tick(tick(now, sequence=10))["accepted"]
+    duplicate = engine.process_tick(tick(now + timedelta(milliseconds=1), sequence=10))
+    assert not duplicate["accepted"]
+    assert "SEQUENCE_REVERSED" in duplicate["reasons"]
+
+    crossed = engine.process_tick(
+        tick(
+            now + timedelta(milliseconds=2),
+            sequence=11,
+            bid=100.2,
+            ask=100.1,
+        )
+    )
+    assert not crossed["accepted"]
+    assert "CROSSED_MARKET" in crossed["reasons"]
+
+
+def test_halt_cancels_pending_order_and_resets_entry_state(tmp_path) -> None:
+    repository = Repository(tmp_path / "halt.db")
+    broker = PaperBroker(repository, {"US": CostConfig(1_500, 0, 0, 0, 0)})
+    engine = TradingEngine(repository, broker)
+    now = datetime.now(UTC)
+    order, _ = broker.submit_entry("US_plan_halt", candidate(), tick(now))
+    assert order
+    halted = tick(
+        now + timedelta(milliseconds=100),
+        sequence=2,
+        market_status="halted",
+        symbol_status="halted",
+        luld_status="paused",
+    )
+    result = engine.process_tick(halted)
+    assert not result["accepted"]
+    assert not broker.portfolios[Market.US].pending_orders
+    state_events = [
+        json.loads(event["payload"])
+        for event in repository.recent_events(20)
+        if event["event_type"] == "ORDER_STATE_CHANGED"
+    ]
+    assert any(event["state"] == OrderState.MARKET_HALTED.value for event in state_events)
+
+
+def test_cross_debounce_requires_ticks_hold_and_margin() -> None:
+    predicate = Predicate(
+        indicator="last",
+        operator="cross_above",
+        value="vwap_regular",
+        confirm_ticks=3,
+        hold_above_ms=2000,
+        minimum_cross_pct=0.05,
+        cooldown_sec=60,
+    )
+    group = RuleGroup(predicates=[predicate])
+    states: dict[str, CrossDebounceState] = {}
+    now = datetime.now(UTC)
+    previous = {"last": 99.9, "vwap_regular": 100.0}
+    current = {"last": 100.06, "vwap_regular": 100.0}
+    assert not evaluate_group(group, current, previous, states=states, evaluated_at=now)
+    assert not evaluate_group(
+        group,
+        current,
+        current,
+        states=states,
+        evaluated_at=now + timedelta(seconds=1),
+    )
+    assert evaluate_group(
+        group,
+        current,
+        current,
+        states=states,
+        evaluated_at=now + timedelta(seconds=2),
+    )
+
+
+def test_us_early_close_uses_official_calendar() -> None:
+    exit_at = force_exit_at(Market.US, date(2026, 11, 27))
+    assert exit_at.hour == 12
+    assert exit_at.minute == 50

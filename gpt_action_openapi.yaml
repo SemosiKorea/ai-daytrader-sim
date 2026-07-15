@@ -1,0 +1,187 @@
+openapi: 3.1.0
+info:
+  title: AI Day Trader Plan Approval
+  version: 2.1.0
+  description: Registers an explicitly user-approved plan for paper trading only.
+servers:
+  - url: https://trade.example.com
+paths:
+  /v1/gpt-actions/plans:
+    post:
+      operationId: registerApprovedPaperTradePlan
+      summary: Register a plan only after the user explicitly approves it and supplies the OTP.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TradePlan'
+      responses:
+        '201':
+          description: Plan armed for paper trading.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanReceipt'
+        '409': {description: Invalid/reused OTP or duplicate plan.}
+        '422': {description: Plan rejected by deterministic validation.}
+  /v1/gpt-actions/plans/{plan_id}/status:
+    get:
+      operationId: getPaperTradePlanStatus
+      summary: Check whether a submitted paper-trading plan is armed or completed.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: plan_id
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Current plan status.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    TradePlan:
+      type: object
+      additionalProperties: false
+      required: [plan_id, plan_version, created_at, market, trade_date, expires_at,
+        approval_nonce, approved_symbols]
+      properties:
+        plan_id: {type: string, pattern: '^[A-Za-z0-9_-]{8,80}$'}
+        plan_version: {type: integer, minimum: 1}
+        created_at: {type: string, format: date-time}
+        market: {type: string, enum: [KR, US]}
+        trade_date: {type: string, format: date}
+        expires_at: {type: string, format: date-time}
+        approval_nonce: {type: string, pattern: '^\d{6}$'}
+        approved_symbols:
+          type: array
+          minItems: 1
+          maxItems: 3
+          items: {$ref: '#/components/schemas/Candidate'}
+    Candidate:
+      type: object
+      additionalProperties: false
+      required: [symbol, exchange, reason, strategy_type, entry, stop_loss, take_profit,
+        force_exit_time]
+      properties:
+        symbol: {type: string}
+        exchange: {type: string}
+        reason: {type: string}
+        strategy_type: {type: string, enum: [rules, pullback_rebreak]}
+        entry: {$ref: '#/components/schemas/Entry'}
+        stop_loss:
+          type: object
+          additionalProperties: false
+          required: [price]
+          properties:
+            price: {type: number, exclusiveMinimum: 0}
+            execution_type: {type: string, enum: [marketable_limit], default: marketable_limit}
+            limit_offset_pct: {type: number, minimum: 0.05, maximum: 2, default: 0.2}
+            emergency_exit_after_sec: {type: number, minimum: 0.1, maximum: 30, default: 2}
+        take_profit:
+          type: array
+          minItems: 1
+          maxItems: 3
+          items:
+            type: object
+            additionalProperties: false
+            required: [price, quantity_pct]
+            properties:
+              price: {type: number, exclusiveMinimum: 0}
+              quantity_pct: {type: integer, minimum: 1, maximum: 100}
+        force_exit_time: {type: string, format: time}
+        exit_policy: {$ref: '#/components/schemas/ExitPolicy'}
+        pullback_rebreak: {$ref: '#/components/schemas/PullbackRebreak'}
+    Entry:
+      type: object
+      additionalProperties: false
+      required: [trigger_price, limit_price, start_time, end_time, price_only, rules]
+      properties:
+        trigger_price: {type: number, exclusiveMinimum: 0}
+        limit_price: {type: number, exclusiveMinimum: 0}
+        start_time: {type: string, format: time}
+        end_time: {type: string, format: time}
+        price_only: {type: boolean}
+        rules: {$ref: '#/components/schemas/RuleGroup'}
+    RuleGroup:
+      type: object
+      additionalProperties: false
+      required: [mode, predicates, groups]
+      properties:
+        mode: {type: string, enum: [all, any]}
+        predicates:
+          type: array
+          maxItems: 12
+          items: {$ref: '#/components/schemas/Predicate'}
+        groups:
+          type: array
+          maxItems: 4
+          items: {$ref: '#/components/schemas/RuleGroup'}
+    Predicate:
+      type: object
+      additionalProperties: false
+      required: [indicator, operator, value]
+      properties:
+        indicator:
+          type: string
+          enum: [last, bid, ask, spread_pct, previous_open, previous_high,
+            previous_low, previous_close, opening_range_5_high, opening_range_5_low,
+            opening_range_10_high, opening_range_10_low, opening_range_15_high,
+            opening_range_15_low, vwap_regular, atr_14_1m_regular,
+            ema_9_1m_regular, ema_20_1m_regular, ema_50_1m_regular,
+            rsi_14_1m_regular, relative_volume_cumulative_20d_same_time_regular,
+            gap_pct, market_above_vwap_regular, recent_high_5_1m_regular,
+            recent_low_5_1m_regular, bar_volume_1m_regular]
+        operator: {type: string, enum: [eq, ne, gt, gte, lt, lte, cross_above, cross_below]}
+        value: {oneOf: [{type: number}, {type: boolean}, {type: string}]}
+        confirm_ticks: {type: integer, minimum: 1, maximum: 20, default: 1}
+        hold_above_ms: {type: integer, minimum: 0, maximum: 60000, default: 0}
+        minimum_cross_pct: {type: number, minimum: 0, maximum: 5, default: 0}
+        cooldown_sec: {type: integer, minimum: 0, maximum: 3600, default: 0}
+    ExitPolicy:
+      type: object
+      additionalProperties: false
+      properties:
+        max_holding_minutes: {type: integer, minimum: 1, maximum: 360, default: 90}
+        no_progress_exit_minutes: {type: integer, minimum: 1, maximum: 180, default: 30}
+        no_progress_min_pct: {type: number, minimum: 0, maximum: 5, default: 0.3}
+        exit_if_below_vwap_sec: {type: integer, minimum: 1, maximum: 600, default: 60}
+        move_stop_to_entry_after_tp1: {type: boolean, default: false}
+    PullbackRebreak:
+      type: object
+      additionalProperties: false
+      properties:
+        breakout_confirm_ticks: {type: integer, minimum: 1, maximum: 20, default: 3}
+        breakout_hold_ms: {type: integer, minimum: 0, maximum: 60000, default: 1000}
+        breakout_relative_volume_min: {type: number, minimum: 0.1, maximum: 10, default: 1.5}
+        pullback_depth_atr_min: {type: number, minimum: 0.05, maximum: 3, default: 0.2}
+        pullback_depth_atr_max: {type: number, minimum: 0.1, maximum: 5, default: 0.8}
+        pullback_min_minutes: {type: number, minimum: 0.5, maximum: 30, default: 2}
+        pullback_max_minutes: {type: number, minimum: 1, maximum: 60, default: 10}
+        pullback_rsi_min: {type: number, minimum: 0, maximum: 100, default: 45}
+        pullback_rsi_max: {type: number, minimum: 0, maximum: 100, default: 60}
+        pullback_volume_ratio_max: {type: number, exclusiveMinimum: 0, maximum: 2, default: 0.7}
+        support_breach_pct_max: {type: number, minimum: 0, maximum: 2, default: 0.15}
+        rebreak_rsi_min: {type: number, minimum: 0, maximum: 100, default: 50}
+        rebreak_rsi_max: {type: number, minimum: 0, maximum: 100, default: 68}
+        rebreak_relative_volume_min: {type: number, minimum: 0.1, maximum: 10, default: 1.3}
+        spread_pct_max: {type: number, exclusiveMinimum: 0, maximum: 2, default: 0.15}
+        require_market_above_vwap: {type: boolean, default: true}
+    PlanReceipt:
+      type: object
+      required: [plan_id, status, content_hash, message]
+      properties:
+        plan_id: {type: string}
+        status: {type: string}
+        content_hash: {type: string}
+        message: {type: string}
