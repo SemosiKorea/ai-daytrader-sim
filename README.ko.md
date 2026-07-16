@@ -192,6 +192,13 @@ curl -X POST http://127.0.0.1:8787/v1/admin/nonces \
 4. 새로운 OTP로 시험하고 응답 코드 `201`, 계획 상태 및 Content Hash가
    올바른지 확인합니다.
 
+모바일에서는 GPT를 사이드바의 GPT 목록에서 직접 열고 새 대화를 시작하십시오.
+Actions를 지원하지 않는 Pro 모드에서는 후보 조회 도구가 대화에 로드되지 않으므로
+Pro 모드를 해제해야 합니다. GPT 편집기에서 지침이나 Action을 바꾼 뒤에는 반드시
+업데이트하여 게시 버전에 반영해야 하며, 기존 모바일 대화가 아니라 새 대화에서
+시험하십시오. 정상 호출이면 ngrok 검사 화면에 User-Agent가
+`ChatGPT-User/1.0`인 `/v1/gpt-actions/candidates` 요청이 나타납니다.
+
 `deploy/`의 launchd 템플릿으로 API, 피드 및 ngrok을 계속 실행할 수 있습니다.
 API와 피드 템플릿은 `~/Library/LaunchAgents`에 설치하기 전에 모든 절대경로
 자리표시자를 실제 경로로 바꾸거나 `scripts/install_runtime_launch_agents.sh`로

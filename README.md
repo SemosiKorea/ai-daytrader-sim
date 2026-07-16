@@ -186,6 +186,12 @@ Then replace the sample's date, expiry, and OTP and post it using
    Action, and configure bearer/API-key authentication with `GPT_ACTION_BEARER`.
 4. Test with a new OTP and confirm a `201` receipt and matching content hash.
 
+On mobile, open the GPT directly from the GPT sidebar and start a new conversation.
+Turn off Pro mode because it does not load Actions. After changing instructions or
+an Action in the GPT editor, publish the update and test from a new mobile
+conversation. A successful invocation appears in ngrok inspection as a
+`/v1/gpt-actions/candidates` request with the `ChatGPT-User/1.0` user agent.
+
 The launchd templates in `deploy/` keep the API, feed, and ngrok running. Replace all
 absolute path placeholders before installing manually, or run
 `scripts/install_runtime_launch_agents.sh` to populate and install the API and feed

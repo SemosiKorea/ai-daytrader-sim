@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Multi-Theme Day Trader Plan Approval
-  version: 2.4.0
+  version: 2.4.1
   description: Reads fresh multi-theme candidates and registers explicitly approved paper plans only.
 servers:
   - url: https://evict-smell-chug.ngrok-free.dev
@@ -9,22 +9,27 @@ paths:
   /v1/gpt-actions/candidates:
     get:
       operationId: getDayTradeCandidates
-      summary: Read the current premarket shortlist or regular-session confirmations.
+      summary: "Required first step: read current KR or US day-trade candidates."
+      description: "Always call this before naming any symbol. For Korean requests use market=KR, phase=auto, limit=3; for US requests use market=US, phase=auto, limit=3."
+      x-openai-isConsequential: false
       security:
         - bearerAuth: []
       parameters:
         - in: query
           name: market
           required: true
+          description: Use KR for Korean-stock requests and US for US-stock requests.
           schema: {type: string, enum: [KR, US]}
         - in: query
           name: phase
           required: false
+          description: Use auto unless the user explicitly requests a diagnostic phase.
           schema: {type: string, enum: [auto, premarket, regular], default: auto}
         - in: query
           name: limit
           required: false
-          schema: {type: integer, minimum: 1, maximum: 10, default: 5}
+          description: The GPT must request at most three candidates.
+          schema: {type: integer, minimum: 1, maximum: 3, default: 3}
       responses:
         '200':
           description: Read-only candidate ranking. It never arms a plan.
