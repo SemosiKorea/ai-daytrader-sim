@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from daytrader.api import create_app
 from daytrader.config import Settings
+from daytrader.models import Market
 
 
 def _settings(tmp_path) -> Settings:
@@ -88,6 +91,8 @@ def test_payload_and_auth_guards(tmp_path) -> None:
         health = client.get("/healthz")
         assert health.json()["kis_order_mode"] == "record_only"
         assert health.json()["live_orders"] is False
+        assert app.state.broker.max_concurrent_positions == 2
+        assert app.state.broker.portfolios[Market.KR].initial_cash == 3_000_000
         assert client.get("/v1/performance/KR").status_code == 401
         assert client.get("/v1/admin/kis-order-intents").status_code == 401
         intents = client.get(
@@ -114,6 +119,30 @@ def test_candidate_action_requires_gpt_bearer(tmp_path) -> None:
         )
         assert response.status_code == 200
         assert response.json()["market"] == "KR"
+
+
+@pytest.mark.asyncio
+async def test_simple_telegram_mode_uses_separate_database_and_disables_actions(
+    tmp_path,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.telegram_bot_token = "123456789:abcdefghijklmnopqrstuvwxyz"
+    settings.telegram_chat_id = "123456789"
+    settings.telegram_trade_poll_enabled = True
+    settings.telegram_trade_database_path = tmp_path / "simple.db"
+    app = create_app(settings, start_scheduler=False)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        health = await client.get("/healthz")
+        legacy = await client.get(
+            "/v1/gpt-actions/candidates?market=KR",
+            headers={"Authorization": "Bearer gpt-secret-1234567890123456"},
+        )
+
+    assert app.state.repository.path == tmp_path / "simple.db"
+    assert health.json()["input_mode"] == "telegram-simple"
+    assert health.json()["telegram_trade_polling"] is True
+    assert legacy.status_code == 410
 
 
 def test_portfolio_experiment_uses_one_time_approval_and_three_cohorts(

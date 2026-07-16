@@ -464,6 +464,22 @@ def test_bridge_subscribes_active_market_universe_before_approval(tmp_path) -> N
     assert len(build_subscriptions(symbols)) <= 40
 
 
+def test_bridge_uses_simple_telegram_database_when_enabled(tmp_path) -> None:
+    simple_database = tmp_path / "simple-telegram.db"
+    settings = EnrichedFeedSettings(
+        _env_file=None,
+        database_path=tmp_path / "legacy.db",
+        telegram_trade_database_path=simple_database,
+        telegram_trade_poll_enabled=True,
+        feed_history_path=tmp_path / "history.db",
+        market_data_bearer="m" * 32,
+    )
+
+    bridge = EnrichedFeedBridge(settings)
+
+    assert bridge.repository.path == simple_database
+
+
 def test_configured_multitheme_universes_leave_subscription_capacity(tmp_path) -> None:
     settings = EnrichedFeedSettings(
         _env_file=None,

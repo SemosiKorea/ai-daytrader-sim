@@ -37,6 +37,8 @@ class EnrichedFeedSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_path: Path = Path("data/daytrader.db")
+    telegram_trade_database_path: Path = Path("data/simple_telegram.db")
+    telegram_trade_poll_enabled: bool = False
     feed_history_path: Path = Path("data/feed_history.db")
     market_data_bearer: str = "change-feed"
     kis_app_key: str | None = None
@@ -146,7 +148,12 @@ class EnrichedFeedBridge:
 
     def __init__(self, settings: EnrichedFeedSettings):
         self.settings = settings
-        self.repository = Repository(settings.database_path)
+        database_path = (
+            settings.telegram_trade_database_path
+            if settings.telegram_trade_poll_enabled
+            else settings.database_path
+        )
+        self.repository = Repository(database_path)
         self.history = FeedHistoryStore(settings.feed_history_path)
         self.calculators: dict[tuple[Market, str], IndicatorCalculator] = {}
         self.quotes: dict[tuple[Market, str], tuple[RawQuote, datetime, str]] = {}

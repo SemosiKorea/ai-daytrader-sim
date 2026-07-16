@@ -1,7 +1,7 @@
 [project]
 name = "ai-daytrader-sim"
-version = "0.7.0"
-description = "GPT-approved, KIS market-data-driven paper day trading simulator"
+version = "0.8.0"
+description = "Telegram-forwarded, KIS market-data-driven paper day trading simulator"
 requires-python = ">=3.11"
 dependencies = [
   "apscheduler>=3.10,<4",

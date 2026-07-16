@@ -125,8 +125,10 @@ def validate_plan(
     plan: TradePlan,
     universe: dict[str, dict[str, dict[str, str]]],
     costs: dict[str, CostConfig],
+    *,
+    now: datetime | None = None,
 ) -> None:
-    now = datetime.now(UTC)
+    now = now or datetime.now(UTC)
     if plan.expires_at.tzinfo is None:
         raise PlanValidationError("expires_at must include a timezone")
     if plan.expires_at.astimezone(UTC) <= now:

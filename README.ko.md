@@ -8,6 +8,24 @@
 
 KIS 주문 기록 게이트웨이: [`docs/KIS_ORDER_GATEWAY.ko.md`](docs/KIS_ORDER_GATEWAY.ko.md)
 
+기본 운영 방식은 심플 텔레그램 자동 가상매매입니다. 자세한 입력 양식과 설정은
+[`docs/SIMPLE_TELEGRAM_TRADING.ko.md`](docs/SIMPLE_TELEGRAM_TRADING.ko.md)를
+참고하십시오.
+
+```text
+ChatGPT 예약 결과 다섯 줄
+→ 사용자가 개인 텔레그램 봇에 전달
+→ 맥 프로그램이 형식과 가격을 검증
+→ KIS 시세로 자동 가상매매
+```
+
+한국 시장 총자금은 3,000,000원이며 메시지는 종목명, 종목코드, 진입가격,
+익절가격, 손절가격만 받습니다. Telegram 단순 모드에서는 Custom GPT Action,
+ngrok 및 OTP 승인 흐름을 사용하지 않습니다.
+
+아래는 호환을 위해 남아 있는 기존 구조의 설명입니다. Telegram 단순 모드가
+활성화되면 기존 `/v1/gpt-actions/*` 경로는 실행되지 않습니다.
+
 다음 흐름을 위한 독립형 가상매매 전용 프로그램입니다.
 
 1. 시세 피드가 승인 전에도 현재 거래시간대의 다중 테마 유니버스를 구독합니다.

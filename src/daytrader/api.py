@@ -31,6 +31,7 @@ from .notifications import TelegramNotifier
 from .repository import PlanConflictError, Repository
 from .scheduler import SessionScheduler
 from .scanner import CandidateScanner
+from .telegram_trading import SimpleTelegramTradeService, TelegramTradeReceiver
 from .validator import PlanValidationError, validate_plan
 
 
@@ -47,7 +48,12 @@ def _require(expected: str, authorization: str | None) -> None:
 
 def create_app(settings: Settings | None = None, *, start_scheduler: bool = True) -> FastAPI:
     settings = settings or Settings()
-    repository = Repository(settings.database_path)
+    database_path = (
+        settings.telegram_trade_database_path
+        if settings.telegram_trade_poll_enabled
+        else settings.database_path
+    )
+    repository = Repository(database_path)
     universe = load_universe(settings.universe_path)
     costs = load_costs(settings.costs_path)
     order_intent_recorder = KISOrderIntentRecorder(
@@ -55,7 +61,12 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
         account_configured=bool(settings.kis_account_number),
         product_code=settings.kis_product_code,
     )
-    broker = PaperBroker(repository, costs, order_intent_recorder)
+    broker = PaperBroker(
+        repository,
+        costs,
+        order_intent_recorder,
+        max_concurrent_positions=2,
+    )
     engine = TradingEngine(repository, broker)
     engine.recover_expired_state()
     notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
@@ -65,8 +76,29 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
         repository, costs, settings.experiment_data_path
     )
     session_scheduler = SessionScheduler(
-        repository, engine, broker, notifier, experiment_manager
+        repository,
+        engine,
+        broker,
+        notifier,
+        experiment_manager,
+        issue_approval_nonces=not settings.telegram_trade_poll_enabled,
     )
+    telegram_trade_service = None
+    telegram_trade_receiver = None
+    if settings.telegram_trade_poll_enabled:
+        telegram_trade_service = SimpleTelegramTradeService(
+            repository,
+            universe,
+            costs,
+            notifier,
+            allowed_chat_id=settings.telegram_chat_id or "",
+            max_message_age_seconds=settings.telegram_trade_message_max_age_seconds,
+        )
+        telegram_trade_receiver = TelegramTradeReceiver(
+            settings.telegram_bot_token or "",
+            telegram_trade_service,
+            poll_timeout_seconds=settings.telegram_trade_poll_timeout_seconds,
+        )
     if settings.kis_poll_enabled:
         if not settings.kis_app_key or not settings.kis_app_secret:
             raise ValueError("KIS polling requires KIS_APP_KEY and KIS_APP_SECRET")
@@ -85,15 +117,19 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
             session_scheduler.start()
         if quote_poller:
             quote_poller.start()
+        if telegram_trade_receiver:
+            telegram_trade_receiver.start()
         yield
+        if telegram_trade_receiver:
+            await telegram_trade_receiver.stop()
         if quote_poller:
             await quote_poller.stop()
         session_scheduler.stop()
 
     app = FastAPI(
         title="AI Day Trader Simulator",
-        version="0.7.0",
-        description="GPT-approved paper trading with record-only KIS order intents.",
+        version="0.8.0",
+        description="Telegram-forwarded simple paper trading with record-only KIS intents.",
         lifespan=lifespan,
     )
     app.state.settings = settings
@@ -108,6 +144,8 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     app.state.quote_poller = quote_poller
     app.state.candidate_scanner = candidate_scanner
     app.state.experiment_manager = experiment_manager
+    app.state.telegram_trade_service = telegram_trade_service
+    app.state.telegram_trade_receiver = telegram_trade_receiver
 
     @app.middleware("http")
     async def reject_large_payload(request: Request, call_next):
@@ -116,6 +154,13 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
             return JSONResponse(
                 status_code=413, content={"detail": "payload too large"}
             )
+        if settings.telegram_trade_poll_enabled and request.url.path.startswith(
+            "/v1/gpt-actions/"
+        ):
+            return JSONResponse(
+                status_code=410,
+                content={"detail": "Custom GPT Actions are disabled in Telegram simple mode"},
+            )
         return await call_next(request)
 
     @app.get("/healthz")
@@ -123,6 +168,12 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
         return {
             "status": "ok",
             "mode": "paper-only",
+            "input_mode": (
+                "telegram-simple"
+                if settings.telegram_trade_poll_enabled
+                else "legacy-gpt-action"
+            ),
+            "telegram_trade_polling": bool(telegram_trade_receiver),
             "kis_order_mode": settings.kis_order_mode,
             "live_orders": False,
         }

@@ -2,6 +2,18 @@
 
 한국어 문서: [`README.ko.md`](README.ko.md)
 
+The primary runtime is now a simple Telegram-forwarded paper-trading flow. A
+ChatGPT scheduled result contains only name, six-digit KR symbol, entry limit,
+take-profit, and stop prices. Forwarding that message from the configured private
+Telegram account arms a KR paper plan. The KR paper account is capped at KRW
+3,000,000 with at most two concurrent positions. See the
+[Korean setup guide](docs/SIMPLE_TELEGRAM_TRADING.ko.md).
+
+When Telegram simple mode is enabled, Custom GPT Actions, ngrok approval, and OTP
+issuance are disabled. KIS order transport remains `record_only`; no live order is
+sent. The legacy workflow below remains documented for compatibility but is not
+available while simple mode is active.
+
 Safety enhancement matrix (Korean):
 [`docs/SAFETY_ENHANCEMENTS.ko.md`](docs/SAFETY_ENHANCEMENTS.ko.md)
 

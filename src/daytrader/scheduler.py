@@ -26,12 +26,15 @@ class SessionScheduler:
         broker: PaperBroker,
         notifier: TelegramNotifier,
         experiment_manager: "PortfolioExperimentManager | None" = None,
+        *,
+        issue_approval_nonces: bool = True,
     ):
         self.repository = repository
         self.engine = engine
         self.broker = broker
         self.notifier = notifier
         self.experiment_manager = experiment_manager
+        self.issue_approval_nonces = issue_approval_nonces
         self.scheduler = AsyncIOScheduler()
         self.closed_sessions: set[tuple[Market, str]] = set()
         self.pending_close_notifications: set[tuple[Market, str]] = set()
@@ -109,8 +112,6 @@ class SessionScheduler:
 
     def start(self) -> None:
         jobs = [
-            (self.issue_nonce, (Market.KR,), 15, 8, "Asia/Seoul", "kr_nonce"),
-            (self.issue_nonce, (Market.US,), 45, 8, "America/New_York", "us_nonce"),
             (self.reset_trade_counter, (Market.KR,), 0, 8, "Asia/Seoul", "kr_reset"),
             (
                 self.reset_trade_counter,
@@ -121,6 +122,13 @@ class SessionScheduler:
                 "us_reset",
             ),
         ]
+        if self.issue_approval_nonces:
+            jobs.extend(
+                [
+                    (self.issue_nonce, (Market.KR,), 15, 8, "Asia/Seoul", "kr_nonce"),
+                    (self.issue_nonce, (Market.US,), 45, 8, "America/New_York", "us_nonce"),
+                ]
+            )
         for function, args, minute, hour, timezone, job_id in jobs:
             self.scheduler.add_job(
                 function,

@@ -137,6 +137,16 @@ class Repository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_equity_snapshots_market_time
                     ON equity_snapshots(market, timestamp, id);
+                CREATE TABLE IF NOT EXISTS telegram_trade_messages (
+                    update_id INTEGER PRIMARY KEY,
+                    message_id INTEGER NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    content_hash TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    received_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             columns = {
@@ -327,6 +337,127 @@ class Repository:
             plan.plan_id,
             {"hash": content_hash, "status": status.value, "version": plan.plan_version},
         )
+        return content_hash
+
+    def claim_telegram_trade_message(
+        self,
+        *,
+        update_id: int,
+        message_id: int,
+        chat_id: str,
+        content_hash: str,
+    ) -> bool:
+        """Claim a Telegram update and normalized payload exactly once."""
+        now = datetime.now(UTC).isoformat()
+        try:
+            with self._lock, self._connect() as db:
+                db.execute(
+                    """INSERT INTO telegram_trade_messages(
+                           update_id, message_id, chat_id, content_hash, status, detail,
+                           received_at, updated_at
+                       ) VALUES (?, ?, ?, ?, 'RECEIVED', '', ?, ?)""",
+                    (update_id, message_id, chat_id, content_hash, now, now),
+                )
+        except sqlite3.IntegrityError:
+            return False
+        return True
+
+    def set_telegram_trade_message_status(
+        self, update_id: int, status: str, detail: str = ""
+    ) -> None:
+        with self._lock, self._connect() as db:
+            db.execute(
+                """UPDATE telegram_trade_messages
+                   SET status=?, detail=?, updated_at=? WHERE update_id=?""",
+                (status, detail[:1000], datetime.now(UTC).isoformat(), update_id),
+            )
+
+    def telegram_trade_message(self, update_id: int) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM telegram_trade_messages WHERE update_id=?", (update_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def next_plan_version(self, market: Market, trade_date: date) -> int:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT payload FROM plans WHERE market=? AND trade_date=?",
+                (market.value, trade_date.isoformat()),
+            ).fetchall()
+        if not rows:
+            return 1
+        return max(TradePlan.model_validate_json(row["payload"]).plan_version for row in rows) + 1
+
+    def arm_telegram_plan(self, plan: TradePlan, *, update_id: int) -> str:
+        """Persist a Telegram-forwarded plan; forwarding is the explicit approval."""
+        payload = plan.model_copy(update={"approval_nonce": "000000"}).model_dump_json()
+        content_hash = self._hash(payload)
+        now = datetime.now(UTC)
+        replaced_plan_ids: list[str] = []
+        with self._lock, self._connect() as db:
+            rows = db.execute(
+                """SELECT plan_id, status, payload FROM plans
+                   WHERE market=? AND trade_date=? ORDER BY created_at DESC""",
+                (plan.market.value, plan.trade_date.isoformat()),
+            ).fetchall()
+            for row in rows:
+                previous = TradePlan.model_validate_json(row["payload"])
+                if plan.plan_version <= previous.plan_version:
+                    raise PlanConflictError("plan_version must increase for a revised plan")
+                if row["status"] in {
+                    PlanStatus.RUNNING.value,
+                    PlanStatus.COMPLETED.value,
+                }:
+                    raise PlanConflictError(
+                        "a Telegram plan cannot replace a running or completed plan"
+                    )
+                if row["status"] == PlanStatus.ARMED.value:
+                    replaced_plan_ids.append(row["plan_id"])
+                    db.execute(
+                        "UPDATE plans SET status=?, updated_at=? WHERE plan_id=?",
+                        (PlanStatus.CANCELLED.value, now.isoformat(), row["plan_id"]),
+                    )
+            db.execute(
+                """INSERT INTO plans(plan_id, market, trade_date, status, content_hash, payload,
+                                      created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    plan.plan_id,
+                    plan.market.value,
+                    plan.trade_date.isoformat(),
+                    PlanStatus.ARMED.value,
+                    content_hash,
+                    payload,
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+        self.add_event(
+            "TELEGRAM_PLAN_ARMED",
+            plan.market,
+            None,
+            plan.plan_id,
+            {
+                "hash": content_hash,
+                "version": plan.plan_version,
+                "update_id": update_id,
+                "symbols": [candidate.symbol for candidate in plan.approved_symbols],
+            },
+        )
+        for replaced_plan_id in replaced_plan_ids:
+            self.add_event(
+                "PLAN_STATUS_CHANGED",
+                plan.market,
+                None,
+                replaced_plan_id,
+                {
+                    "from": PlanStatus.ARMED.value,
+                    "to": PlanStatus.CANCELLED.value,
+                    "reason": "REPLACED_BY_TELEGRAM_MESSAGE",
+                    "replacement_plan_id": plan.plan_id,
+                },
+            )
         return content_hash
 
     def approve_plan(self, plan: TradePlan) -> str | None:

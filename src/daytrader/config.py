@@ -17,12 +17,16 @@ class Settings(BaseSettings):
     app_host: str = "127.0.0.1"
     app_port: int = 8787
     database_path: Path = Path("data/daytrader.db")
+    telegram_trade_database_path: Path = Path("data/simple_telegram.db")
     experiment_data_path: Path = Path("data/experiments")
     gpt_action_bearer: str = "change-me"
     admin_bearer: str = "change-admin"
     market_data_bearer: str = "change-feed"
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
+    telegram_trade_poll_enabled: bool = False
+    telegram_trade_poll_timeout_seconds: int = 25
+    telegram_trade_message_max_age_seconds: float = 120
     kis_app_key: str | None = None
     kis_app_secret: str | None = None
     kis_account_number: str | None = None
@@ -57,6 +61,14 @@ class Settings(BaseSettings):
             raise ValueError("TELEGRAM_BOT_TOKEN has an invalid format")
         if self.telegram_chat_id and not re.fullmatch(r"-?[0-9]+", self.telegram_chat_id):
             raise ValueError("TELEGRAM_CHAT_ID must be an integer")
+        if self.telegram_trade_poll_enabled and not all(telegram_values):
+            raise ValueError(
+                "Telegram trade polling requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID"
+            )
+        if not 1 <= self.telegram_trade_poll_timeout_seconds <= 50:
+            raise ValueError("TELEGRAM_TRADE_POLL_TIMEOUT_SECONDS must be between 1 and 50")
+        if not 10 <= self.telegram_trade_message_max_age_seconds <= 600:
+            raise ValueError("TELEGRAM_TRADE_MESSAGE_MAX_AGE_SECONDS must be between 10 and 600")
         if self.kis_account_number and (
             len(self.kis_account_number) != 8 or not self.kis_account_number.isdigit()
         ):
