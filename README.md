@@ -102,7 +102,9 @@ Setup and operational limitations of the included KIS WebSocket bridge are in
 
 The included `daytrader-feed` process discovers symbols in armed plans, subscribes
 to read-only KIS WebSocket trade/quote feeds, calculates the indicator contract,
-and posts authenticated ticks to the simulator:
+and posts authenticated ticks to the simulator. WebSocket reception is decoupled
+from indicator and HTTP work, and only the latest per-symbol quote/trade pair is
+coalesced every 100-250ms to prevent high-volume symbols from creating a backlog:
 
 ```bash
 # Run the API first, then the feed in a second terminal.

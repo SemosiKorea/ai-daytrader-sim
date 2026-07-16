@@ -30,6 +30,7 @@ FEED_HISTORY_PATH=data/feed_history.db
 FEED_TARGET_URL=http://127.0.0.1:8787/v1/market-data/ticks
 FEED_DISCOVERY_SECONDS=5.0
 FEED_QUOTE_MAX_AGE_SECONDS=3.0
+FEED_EMIT_INTERVAL_MS=200
 FEED_US_QUOTE_SCOPE=venue
 FEED_OVERSEAS_TR_KEY_PREFIX=D
 FEED_REFERENCE_KR=069500:KRX
@@ -67,6 +68,12 @@ uv run daytrader-feed
 두 시장을 시간대별로 나눠 KIS WebSocket의 연결당 40개 구독 한도를 넘지 않습니다.
 대상 종목이 바뀌면 WebSocket을 재연결하며 시장 기준 종목도 함께 구독해
 `market_above_vwap_regular`을 계산합니다.
+
+WebSocket 수신은 지표 계산과 HTTP 전송을 기다리지 않습니다. 종목별 최신 호가와
+최신 체결만 보관하고 기본 200ms 간격으로 병합하며, 양쪽이 모두 갱신된 경우에만
+스냅샷을 전송합니다. 처리 대기 중 3초를 넘긴 레코드는 서버로 보내지 않고
+폐기합니다. `FEED_EMIT_INTERVAL_MS`는 100~250ms 범위에서만 설정할 수 있습니다.
+시뮬레이터도 동일한 `STALE_DATA`를 틱마다 저장하지 않고 60초 단위로 집계합니다.
 
 ## 계산 및 저장
 

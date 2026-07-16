@@ -45,6 +45,7 @@ class EnrichedFeedSettings(BaseSettings):
     feed_target_url: str = "http://127.0.0.1:8787/v1/market-data/ticks"
     feed_discovery_seconds: float = 5.0
     feed_quote_max_age_seconds: float = 3.0
+    feed_emit_interval_ms: int = 200
     feed_us_quote_scope: Literal["venue", "consolidated"] = "venue"
     feed_overseas_tr_key_prefix: str = "D"
     feed_reference_kr: str = "069500:KRX"
@@ -60,6 +61,8 @@ class EnrichedFeedSettings(BaseSettings):
             raise ValueError("FEED_OVERSEAS_TR_KEY_PREFIX must be D or R")
         if self.feed_discovery_seconds < 1 or self.feed_quote_max_age_seconds <= 0:
             raise ValueError("feed timing values must be positive")
+        if not 100 <= self.feed_emit_interval_ms <= 250:
+            raise ValueError("FEED_EMIT_INTERVAL_MS must be between 100 and 250")
         if min(
             self.feed_scan_premarket_minutes_kr,
             self.feed_scan_premarket_minutes_us,
@@ -90,6 +93,44 @@ class PremarketAccumulator:
         self.notional += price * size
         self.updated_at = at
 
+    def update_batch(
+        self,
+        *,
+        high: float,
+        low: float,
+        last: float,
+        volume: int,
+        notional: float,
+        at: datetime,
+    ) -> None:
+        self.high = max(self.high, high)
+        self.low = min(self.low, low)
+        self.last = last
+        self.volume += max(0, volume)
+        self.notional += max(0.0, notional)
+        self.updated_at = at
+
+
+@dataclass(slots=True)
+class PendingSymbolRecords:
+    connection_id: str
+    quote: RawQuote | None = None
+    quote_received_at: datetime | None = None
+    quote_version: int = 0
+    trade: RawTrade | None = None
+    trade_received_at: datetime | None = None
+    trade_version: int = 0
+    trade_batch_open: float | None = None
+    trade_batch_high: float | None = None
+    trade_batch_low: float | None = None
+    trade_batch_volume: int = 0
+    trade_batch_notional: float = 0.0
+    applied_quote_version: int = 0
+    applied_trade_version: int = 0
+    emitted_quote_version: int = 0
+    emitted_trade_version: int = 0
+    indicative_quote_version: int = 0
+
 
 def _reference(value: str, market: Market) -> FeedSymbol | None:
     if not value.strip():
@@ -113,6 +154,10 @@ class EnrichedFeedBridge:
         self.cumulative_volumes: dict[tuple[Market, str], tuple[date, int]] = {}
         self.premarket: dict[tuple[Market, str], PremarketAccumulator] = {}
         self.sequences: dict[tuple[Market, str], int] = {}
+        self.pending_records: dict[tuple[Market, str], PendingSymbolRecords] = {}
+        self.pending_event = asyncio.Event()
+        self.dropped_records = 0
+        self._last_drop_log_at: datetime | None = None
         self.universe = load_universe(settings.universe_path)
         self.references = {
             Market.KR: _reference(settings.feed_reference_kr, Market.KR),
@@ -268,6 +313,20 @@ class EnrichedFeedBridge:
                 response.status_code,
                 response.text[:500],
             )
+
+    def _record_drop(self, count: int, now: datetime) -> None:
+        self.dropped_records += count
+        if self._last_drop_log_at is None:
+            self._last_drop_log_at = now
+            return
+        if (now - self._last_drop_log_at).total_seconds() < 60:
+            return
+        logger.warning(
+            "discarded %d superseded or stale KIS records in the last interval",
+            self.dropped_records,
+        )
+        self.dropped_records = 0
+        self._last_drop_log_at = now
 
     async def _emit_indicative_quote(
         self, quote: RawQuote, received_at: datetime, connection_id: str
@@ -426,39 +485,228 @@ class EnrichedFeedBridge:
     async def on_record(
         self, record: RawQuote | RawTrade, received_at: datetime, connection_id: str
     ) -> None:
+        """Store only the newest record and return without doing HTTP or indicator work."""
         key = (record.market, record.symbol.upper())
+        state = self.pending_records.get(key)
+        if state is None or state.connection_id != connection_id:
+            state = PendingSymbolRecords(connection_id=connection_id)
+            self.pending_records[key] = state
         if isinstance(record, RawQuote):
-            self.quotes[key] = (record, received_at, connection_id)
-            await self._emit_indicative_quote(record, received_at, connection_id)
+            if state.quote is not None and record.at < state.quote.at:
+                self._record_drop(1, received_at)
+                return
+            if state.quote_version > state.applied_quote_version:
+                self._record_drop(1, received_at)
+            state.quote = record
+            state.quote_received_at = received_at
+            state.quote_version += 1
         else:
-            self.trades[key] = (record, received_at, connection_id)
+            if state.trade is not None and record.at < state.trade.at:
+                self._record_drop(1, received_at)
+                return
+            if state.trade_version > state.applied_trade_version:
+                self._record_drop(1, received_at)
             local_date = record.at.astimezone(MARKET_TZ[record.market]).date()
-            prior = self.cumulative_volumes.get(key)
-            quantity = record.size
-            if prior and prior[0] == local_date and record.cumulative_volume >= prior[1]:
-                quantity = record.cumulative_volume - prior[1]
-            self.cumulative_volumes[key] = (local_date, record.cumulative_volume)
-            if self._session(record.market, record.at) == "premarket":
-                state = self.premarket.get(key)
-                if state is None or state.trade_date != local_date:
-                    self.premarket[key] = PremarketAccumulator(
-                        trade_date=local_date,
-                        open=record.last,
-                        high=record.last,
-                        low=record.last,
-                        last=record.last,
-                        volume=max(0, quantity),
-                        notional=record.last * max(0, quantity),
-                        updated_at=record.at,
-                        previous_close=record.previous_close,
-                    )
-                else:
-                    state.update(record.last, quantity, record.at)
-                    state.previous_close = record.previous_close or state.previous_close
-            self._calculator(record.market, record.symbol).on_trade(
-                record.last, quantity, record.at
+            prior_cumulative: int | None = None
+            if state.trade is not None and (
+                state.trade.at.astimezone(MARKET_TZ[state.trade.market]).date() == local_date
+            ):
+                prior_cumulative = state.trade.cumulative_volume
+            else:
+                prior = self.cumulative_volumes.get(key)
+                if prior and prior[0] == local_date:
+                    prior_cumulative = prior[1]
+            quantity = max(0, record.size)
+            if prior_cumulative is not None and record.cumulative_volume >= prior_cumulative:
+                quantity = record.cumulative_volume - prior_cumulative
+            if state.trade_batch_open is None:
+                state.trade_batch_open = record.last
+            state.trade_batch_high = max(state.trade_batch_high or record.last, record.last)
+            state.trade_batch_low = min(state.trade_batch_low or record.last, record.last)
+            state.trade_batch_volume += quantity
+            state.trade_batch_notional += record.last * quantity
+            state.trade = record
+            state.trade_received_at = received_at
+            state.trade_version += 1
+        self.pending_event.set()
+
+    def _apply_trade(
+        self,
+        key: tuple[Market, str],
+        trade: RawTrade,
+        received_at: datetime,
+        connection_id: str,
+        batch_open: float,
+        batch_high: float,
+        batch_low: float,
+        batch_volume: int,
+        batch_notional: float,
+    ) -> None:
+        self.trades[key] = (trade, received_at, connection_id)
+        local_date = trade.at.astimezone(MARKET_TZ[trade.market]).date()
+        self.cumulative_volumes[key] = (local_date, trade.cumulative_volume)
+        if self._session(trade.market, trade.at) == "premarket":
+            accumulator = self.premarket.get(key)
+            if accumulator is None or accumulator.trade_date != local_date:
+                self.premarket[key] = PremarketAccumulator(
+                    trade_date=local_date,
+                    open=batch_open,
+                    high=batch_high,
+                    low=batch_low,
+                    last=trade.last,
+                    volume=batch_volume,
+                    notional=batch_notional,
+                    updated_at=trade.at,
+                    previous_close=trade.previous_close,
+                )
+            else:
+                accumulator.update_batch(
+                    high=batch_high,
+                    low=batch_low,
+                    last=trade.last,
+                    volume=batch_volume,
+                    notional=batch_notional,
+                    at=trade.at,
+                )
+                accumulator.previous_close = trade.previous_close or accumulator.previous_close
+        self._calculator(trade.market, trade.symbol).on_trade(
+            trade.last,
+            batch_volume,
+            trade.at,
+            opening_price=batch_open,
+            high=batch_high,
+            low=batch_low,
+            notional=batch_notional,
+        )
+
+    async def flush_pending_once(self, now: datetime | None = None) -> None:
+        """Apply one coalesced snapshot per symbol without blocking WebSocket reception."""
+        now = now or datetime.now().astimezone()
+        snapshots = []
+        for key, state in self.pending_records.items():
+            snapshots.append(
+                (
+                    key,
+                    state,
+                    state.quote,
+                    state.quote_received_at,
+                    state.quote_version,
+                    state.trade,
+                    state.trade_received_at,
+                    state.trade_version,
+                    state.trade_batch_open,
+                    state.trade_batch_high,
+                    state.trade_batch_low,
+                    state.trade_batch_volume,
+                    state.trade_batch_notional,
+                )
             )
-        await self._emit(key, received_at, connection_id)
+            state.trade_batch_open = None
+            state.trade_batch_high = None
+            state.trade_batch_low = None
+            state.trade_batch_volume = 0
+            state.trade_batch_notional = 0.0
+        for (
+            key,
+            state,
+            quote,
+            quote_received_at,
+            quote_version,
+            trade,
+            trade_received_at,
+            trade_version,
+            trade_batch_open,
+            trade_batch_high,
+            trade_batch_low,
+            trade_batch_volume,
+            trade_batch_notional,
+        ) in snapshots:
+            if self.pending_records.get(key) is not state:
+                continue
+            stale_quote = bool(
+                quote
+                and (now - quote.at.astimezone(now.tzinfo)).total_seconds()
+                > self.settings.feed_quote_max_age_seconds
+            )
+            stale_trade = bool(
+                trade
+                and (now - trade.at.astimezone(now.tzinfo)).total_seconds()
+                > self.settings.feed_quote_max_age_seconds
+            )
+            if stale_quote and quote_version > state.applied_quote_version:
+                state.applied_quote_version = quote_version
+                state.emitted_quote_version = quote_version
+                state.indicative_quote_version = quote_version
+                self._record_drop(1, now)
+            if stale_trade and trade_version > state.applied_trade_version:
+                state.applied_trade_version = trade_version
+                state.emitted_trade_version = trade_version
+                self._record_drop(1, now)
+            if (
+                quote is not None
+                and quote_received_at is not None
+                and not stale_quote
+                and quote_version > state.applied_quote_version
+            ):
+                self.quotes[key] = (quote, quote_received_at, state.connection_id)
+                state.applied_quote_version = quote_version
+            if (
+                trade is not None
+                and trade_received_at is not None
+                and trade_batch_open is not None
+                and trade_batch_high is not None
+                and trade_batch_low is not None
+                and not stale_trade
+                and trade_version > state.applied_trade_version
+            ):
+                self._apply_trade(
+                    key,
+                    trade,
+                    trade_received_at,
+                    state.connection_id,
+                    trade_batch_open,
+                    trade_batch_high,
+                    trade_batch_low,
+                    trade_batch_volume,
+                    trade_batch_notional,
+                )
+                state.applied_trade_version = trade_version
+            if (
+                quote is not None
+                and quote_received_at is not None
+                and not stale_quote
+                and quote_version > state.indicative_quote_version
+            ):
+                await self._emit_indicative_quote(quote, quote_received_at, state.connection_id)
+                state.indicative_quote_version = quote_version
+            if (
+                quote is not None
+                and trade is not None
+                and quote_received_at is not None
+                and trade_received_at is not None
+                and not stale_quote
+                and not stale_trade
+                and quote_version > state.emitted_quote_version
+                and trade_version > state.emitted_trade_version
+            ):
+                received_at = max(quote_received_at, trade_received_at)
+                await self._emit(key, received_at, state.connection_id)
+                state.emitted_quote_version = quote_version
+                state.emitted_trade_version = trade_version
+
+    async def _process_pending_records(self) -> None:
+        interval = self.settings.feed_emit_interval_ms / 1000
+        while True:
+            await self.pending_event.wait()
+            await asyncio.sleep(interval)
+            self.pending_event.clear()
+            await self.flush_pending_once()
+            if any(
+                state.quote_version > state.applied_quote_version
+                or state.trade_version > state.applied_trade_version
+                for state in self.pending_records.values()
+            ):
+                self.pending_event.set()
 
     async def run(self) -> None:
         if not self.settings.kis_app_key or not self.settings.kis_app_secret:
@@ -480,7 +728,11 @@ class EnrichedFeedBridge:
             self.settings.feed_discovery_seconds,
         )
         try:
-            await stream.run()
+            async with asyncio.TaskGroup() as tasks:
+                tasks.create_task(stream.run(), name="kis-websocket-stream")
+                tasks.create_task(
+                    self._process_pending_records(), name="kis-latest-record-processor"
+                )
         finally:
             await self.http.aclose()
 

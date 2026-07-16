@@ -260,7 +260,17 @@ class IndicatorCalculator:
         self.completed.append(self.current)
         self.current = None
 
-    def on_trade(self, price: float, size: int, at: datetime) -> None:
+    def on_trade(
+        self,
+        price: float,
+        size: int,
+        at: datetime,
+        *,
+        opening_price: float | None = None,
+        high: float | None = None,
+        low: float | None = None,
+        notional: float | None = None,
+    ) -> None:
         local = at.astimezone(MARKET_TZ[self.market])
         trade_date = local.date()
         if not is_session(self.market, trade_date):
@@ -279,24 +289,25 @@ class IndicatorCalculator:
                 market=self.market,
                 symbol=self.symbol,
                 start=minute,
-                open=price,
+                open=opening_price if opening_price is not None else price,
                 high=price,
                 low=price,
                 close=price,
                 volume=0,
                 notional=0.0,
             )
-        self.current.high = max(self.current.high, price)
-        self.current.low = min(self.current.low, price)
+        self.current.high = max(self.current.high, high if high is not None else price)
+        self.current.low = min(self.current.low, low if low is not None else price)
         self.current.close = price
         quantity = max(0, size)
+        trade_notional = max(0.0, notional) if notional is not None else price * quantity
         self.current.volume += quantity
-        self.current.notional += price * quantity
+        self.current.notional += trade_notional
         self.session_volume += quantity
-        self.session_notional += price * quantity
+        self.session_notional += trade_notional
         session_open, _ = session_bounds(self.market, trade_date)
         if minute == session_open and self.first_trade is None:
-            self.first_trade = price
+            self.first_trade = opening_price if opening_price is not None else price
 
     def _sessions(self) -> list[date]:
         return sorted({self._bar_date(bar) for bar in self.completed})

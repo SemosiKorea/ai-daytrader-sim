@@ -227,6 +227,43 @@ def test_sequence_and_crossed_quotes_are_rejected(tmp_path) -> None:
     assert "CROSSED_MARKET" in crossed["reasons"]
 
 
+def test_identical_stale_data_rejections_are_aggregated(tmp_path) -> None:
+    repository = Repository(tmp_path / "stale-aggregate.db")
+    broker = PaperBroker(repository, {"US": CostConfig(1_500, 0, 0, 0, 0)})
+    engine = TradingEngine(repository, broker)
+    stale_at = datetime.now(UTC) - timedelta(seconds=10)
+
+    for sequence in range(100):
+        result = engine.process_tick(
+            tick(stale_at + timedelta(milliseconds=sequence), sequence=sequence + 1)
+        )
+        assert result == {"accepted": False, "reasons": ["STALE_DATA"]}
+
+    rejection_events = [
+        event
+        for event in repository.recent_events(200)
+        if event["event_type"].startswith("DATA_REJECTED")
+    ]
+    assert len(rejection_events) == 1
+    payload = json.loads(rejection_events[0]["payload"])
+    assert payload["details"]["aggregation"] == "initial"
+    aggregate = engine.rejection_aggregates[(Market.US, "NVDA", ("STALE_DATA",))]
+    assert aggregate.count == 100
+
+    recovered = engine.process_tick(tick(datetime.now(UTC), sequence=101))
+    assert recovered["accepted"]
+    rejection_events = [
+        event
+        for event in repository.recent_events(200)
+        if event["event_type"].startswith("DATA_REJECTED")
+    ]
+    assert len(rejection_events) == 2
+    summary = json.loads(rejection_events[0]["payload"])
+    assert summary["details"]["aggregate_count"] == 100
+    assert summary["details"]["aggregation"] == "flushed_on_recovery"
+    assert not engine.rejection_aggregates
+
+
 def test_halt_cancels_pending_order_and_resets_entry_state(tmp_path) -> None:
     repository = Repository(tmp_path / "halt.db")
     broker = PaperBroker(repository, {"US": CostConfig(1_500, 0, 0, 0, 0)})

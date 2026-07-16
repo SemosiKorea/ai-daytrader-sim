@@ -180,6 +180,7 @@ async def test_bridge_posts_a_schema_valid_enriched_tick(tmp_path) -> None:
 
     await bridge.on_record(quote, at, "connection-1")
     await bridge.on_record(trade, at, "connection-1")
+    await bridge.flush_pending_once(at)
 
     assert len(requests) == 1
     payload = requests[0]["json"]
@@ -224,6 +225,7 @@ async def test_bridge_does_not_join_records_across_reconnections(tmp_path) -> No
 
     await bridge.on_record(quote, at, "connection-old")
     await bridge.on_record(trade, at, "connection-new")
+    await bridge.flush_pending_once(at)
 
     assert requests == []
 
@@ -268,6 +270,7 @@ async def test_bridge_keeps_premarket_separate_from_regular_indicators(tmp_path)
         at,
         "connection-1",
     )
+    await bridge.flush_pending_once(at)
 
     assert requests[0]["session"] == "premarket"
     assert requests[0]["indicator_ready"]["premarket_vwap"] is True
@@ -316,11 +319,133 @@ async def test_bridge_emits_kr_indicative_snapshot_without_trade(tmp_path) -> No
     )
 
     await bridge.on_record(quote, at, "connection-1")
+    await bridge.flush_pending_once(at)
 
     assert requests[0]["data_source"] == "KIS_WEBSOCKET_INDICATIVE"
     assert requests[0]["last"] == 69_950
     assert requests[0]["indicators"]["premarket_volume"] == 15_000
     assert requests[0]["indicator_ready"]["premarket_gap_pct"] is True
+
+
+@pytest.mark.asyncio
+async def test_bridge_coalesces_to_latest_and_requires_both_sides_to_change(tmp_path) -> None:
+    settings = EnrichedFeedSettings(
+        _env_file=None,
+        database_path=tmp_path / "daytrader.db",
+        feed_history_path=tmp_path / "history.db",
+        market_data_bearer="m" * 32,
+        feed_target_url="http://feed.test/v1/market-data/ticks",
+    )
+    bridge = EnrichedFeedBridge(settings)
+    requests: list[dict] = []
+
+    class FakeHTTP:
+        async def post(self, url, *, headers, json):
+            requests.append(json)
+
+            class Response:
+                status_code = 202
+                text = ""
+
+            return Response()
+
+        async def aclose(self):
+            return None
+
+    await bridge.http.aclose()
+    bridge.http = FakeHTTP()
+    at = datetime(2026, 7, 15, 1, 5, tzinfo=UTC)
+    await bridge.on_record(
+        RawQuote(Market.KR, "005930", at, 69_900, 70_000, 120, 80),
+        at,
+        "connection-1",
+    )
+    await bridge.on_record(
+        RawQuote(Market.KR, "005930", at, 69_950, 70_050, 100, 90),
+        at,
+        "connection-1",
+    )
+    await bridge.on_record(
+        RawTrade(Market.KR, "005930", at, 70_000, 10, 1000),
+        at,
+        "connection-1",
+    )
+    await bridge.on_record(
+        RawTrade(Market.KR, "005930", at, 70_025, 5, 1005),
+        at,
+        "connection-1",
+    )
+
+    await bridge.flush_pending_once(at)
+
+    assert len(requests) == 1
+    assert requests[0]["last"] == 70_025
+    assert requests[0]["bid"] == 69_950
+    assert requests[0]["indicators"]["vwap_regular"] == pytest.approx(
+        (70_000 * 10 + 70_025 * 5) / 15
+    )
+
+    await bridge.on_record(
+        RawTrade(Market.KR, "005930", at, 70_050, 5, 1010),
+        at,
+        "connection-1",
+    )
+    await bridge.flush_pending_once(at)
+    assert len(requests) == 1
+
+    await bridge.on_record(
+        RawQuote(Market.KR, "005930", at, 70_000, 70_100, 80, 70),
+        at,
+        "connection-1",
+    )
+    await bridge.flush_pending_once(at)
+    assert len(requests) == 2
+    assert requests[-1]["last"] == 70_050
+
+
+@pytest.mark.asyncio
+async def test_bridge_discards_stale_pending_records_before_http(tmp_path) -> None:
+    settings = EnrichedFeedSettings(
+        _env_file=None,
+        database_path=tmp_path / "daytrader.db",
+        feed_history_path=tmp_path / "history.db",
+        market_data_bearer="m" * 32,
+    )
+    bridge = EnrichedFeedBridge(settings)
+    requests: list[dict] = []
+
+    class FakeHTTP:
+        async def post(self, url, *, headers, json):
+            requests.append(json)
+
+            class Response:
+                status_code = 202
+                text = ""
+
+            return Response()
+
+        async def aclose(self):
+            return None
+
+    await bridge.http.aclose()
+    bridge.http = FakeHTTP()
+    at = datetime(2026, 7, 15, 1, 5, tzinfo=UTC)
+    received = at.replace(second=10)
+    await bridge.on_record(
+        RawQuote(Market.KR, "005930", at, 69_900, 70_000, 120, 80),
+        received,
+        "connection-1",
+    )
+    await bridge.on_record(
+        RawTrade(Market.KR, "005930", at, 69_950, 10, 1000),
+        received,
+        "connection-1",
+    )
+
+    await bridge.flush_pending_once(received)
+
+    assert requests == []
+    assert bridge.dropped_records >= 2
 
 
 def test_bridge_subscribes_active_market_universe_before_approval(tmp_path) -> None:

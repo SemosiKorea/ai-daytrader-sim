@@ -32,7 +32,18 @@ class FeedState:
     context_reset: bool = False
 
 
+@dataclass
+class RejectionAggregate:
+    first_seen: datetime
+    last_seen: datetime
+    last_logged_at: datetime
+    count: int
+    last_tick: MarketTick
+
+
 class TradingEngine:
+    DATA_REJECTION_LOG_INTERVAL = timedelta(seconds=60)
+
     def __init__(self, repository: Repository, broker: PaperBroker):
         self.repository = repository
         self.broker = broker
@@ -40,6 +51,9 @@ class TradingEngine:
         self.previous_context: dict[tuple[Market, str], dict] = {}
         self.feed_states: dict[tuple[Market, str], FeedState] = {}
         self.cross_states: dict[tuple[str, str], dict[str, CrossDebounceState]] = {}
+        self.rejection_aggregates: dict[
+            tuple[Market, str, tuple[str, ...]], RejectionAggregate
+        ] = {}
         self.pullback = PullbackRebreakEngine(repository)
 
     @staticmethod
@@ -124,6 +138,67 @@ class TradingEngine:
             ):
                 reasons.append("SEQUENCE_REVERSED")
         return reasons
+
+    def _log_data_rejection(self, tick: MarketTick, reasons: list[str]) -> None:
+        if reasons != ["STALE_DATA"]:
+            self._log_rejection(tick, None, reasons, "DATA_REJECTED")
+            return
+        now = datetime.now(UTC)
+        key = (tick.market, tick.symbol.upper(), tuple(reasons))
+        aggregate = self.rejection_aggregates.get(key)
+        if aggregate is None:
+            self.rejection_aggregates[key] = RejectionAggregate(
+                first_seen=now,
+                last_seen=now,
+                last_logged_at=now,
+                count=1,
+                last_tick=tick,
+            )
+            self._log_rejection(
+                tick,
+                None,
+                reasons,
+                "DATA_REJECTED",
+                {"aggregate_count": 1, "aggregation": "initial"},
+            )
+            return
+        aggregate.last_seen = now
+        aggregate.last_tick = tick
+        aggregate.count += 1
+        if now - aggregate.last_logged_at < self.DATA_REJECTION_LOG_INTERVAL:
+            return
+        self._log_rejection(
+            aggregate.last_tick,
+            None,
+            reasons,
+            "DATA_REJECTED_SUMMARY",
+            {
+                "aggregate_count": aggregate.count,
+                "aggregate_window_started_at": aggregate.first_seen,
+                "aggregate_window_ended_at": aggregate.last_seen,
+            },
+        )
+        aggregate.first_seen = now
+        aggregate.last_logged_at = now
+        aggregate.count = 0
+
+    def _flush_stale_rejection_aggregate(self, tick: MarketTick) -> None:
+        key = (tick.market, tick.symbol.upper(), ("STALE_DATA",))
+        aggregate = self.rejection_aggregates.pop(key, None)
+        if aggregate is None or aggregate.count <= 1:
+            return
+        self._log_rejection(
+            aggregate.last_tick,
+            None,
+            ["STALE_DATA"],
+            "DATA_REJECTED_SUMMARY",
+            {
+                "aggregate_count": aggregate.count,
+                "aggregate_window_started_at": aggregate.first_seen,
+                "aggregate_window_ended_at": aggregate.last_seen,
+                "aggregation": "flushed_on_recovery",
+            },
+        )
 
     def _update_feed_state(self, tick: MarketTick) -> FeedState:
         key = (tick.market, tick.symbol.upper())
@@ -438,8 +513,11 @@ class TradingEngine:
         tick.symbol = tick.symbol.upper()
         feed_errors = self._validate_feed(tick)
         if feed_errors:
-            self._log_rejection(tick, None, feed_errors, "DATA_REJECTED")
+            if feed_errors != ["STALE_DATA"]:
+                self._flush_stale_rejection_aggregate(tick)
+            self._log_data_rejection(tick, feed_errors)
             return {"accepted": False, "reasons": feed_errors}
+        self._flush_stale_rejection_aggregate(tick)
         feed = self._update_feed_state(tick)
         key = (tick.market, tick.symbol)
         self.latest_ticks[key] = tick
