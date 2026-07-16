@@ -59,7 +59,16 @@ def test_premarket_scanner_returns_guard_template(tmp_path) -> None:
     repository.save_market_snapshot(tick, now.date())
     scanner = CandidateScanner(
         repository,
-        {"KR": {"005930": {"name": "Samsung", "exchange": "KRX"}}, "US": {}},
+        {
+            "KR": {
+                "005930": {
+                    "name": "Samsung",
+                    "exchange": "KRX",
+                    "theme": "AI·반도체",
+                }
+            },
+            "US": {},
+        },
         settings,
     )
 
@@ -67,6 +76,7 @@ def test_premarket_scanner_returns_guard_template(tmp_path) -> None:
 
     assert result["status"] == "PREMARKET_SCAN_OPEN"
     assert result["candidates"][0]["symbol"] == "005930"
+    assert result["candidates"][0]["theme"] == "AI·반도체"
     assert result["candidates"][0]["premarket_guard_template"]["reference_price"] == 102
 
 

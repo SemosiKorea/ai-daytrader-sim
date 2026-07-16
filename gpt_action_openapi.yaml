@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
-  title: AI Day Trader Plan Approval
-  version: 2.3.0
-  description: Reads fresh AI/semiconductor candidates and registers explicitly approved paper plans only.
+  title: Multi-Theme Day Trader Plan Approval
+  version: 2.4.0
+  description: Reads fresh multi-theme candidates and registers explicitly approved paper plans only.
 servers:
   - url: https://evict-smell-chug.ngrok-free.dev
 paths:
@@ -452,11 +452,12 @@ components:
           items:
             type: object
             additionalProperties: true
-            required: [symbol, name, exchange, score, as_of, session, quote_scope,
+            required: [symbol, name, theme, exchange, score, as_of, session, quote_scope,
               last, bid, ask, spread_pct, indicators, premarket_guard_template]
             properties:
               symbol: {type: string}
               name: {type: string}
+              theme: {type: string}
               exchange: {type: string}
               score: {type: number}
               as_of: {type: string, format: date-time}

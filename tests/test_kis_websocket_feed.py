@@ -337,3 +337,24 @@ def test_bridge_subscribes_active_market_universe_before_approval(tmp_path) -> N
     assert FeedSymbol(Market.KR, "005930", "KRX") in symbols
     assert any(item.reference and item.market == Market.KR for item in symbols)
     assert len(build_subscriptions(symbols)) <= 40
+
+
+def test_configured_multitheme_universes_leave_subscription_capacity(tmp_path) -> None:
+    settings = EnrichedFeedSettings(
+        _env_file=None,
+        database_path=tmp_path / "daytrader.db",
+        feed_history_path=tmp_path / "history.db",
+        universe_path="config/universe.yaml",
+        market_data_bearer="m" * 32,
+    )
+    bridge = EnrichedFeedBridge(settings)
+
+    kr_symbols = bridge.feed_symbols(datetime(2026, 7, 15, 23, 45, tzinfo=UTC))
+    us_symbols = bridge.feed_symbols(datetime(2026, 7, 16, 13, 0, tzinfo=UTC))
+
+    assert len([item for item in kr_symbols if item.market == Market.KR]) == 19
+    assert len([item for item in us_symbols if item.market == Market.US]) == 19
+    assert len(build_subscriptions(kr_symbols)) == 38
+    assert len(build_subscriptions(us_symbols)) == 38
+    assert bridge.universe["KR"]["012450"]["theme"] == "방산·우주항공"
+    assert bridge.universe["US"]["CRWD"]["theme"] == "사이버보안"

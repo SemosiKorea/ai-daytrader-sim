@@ -16,7 +16,7 @@ KIS record-only order gateway (Korean):
 
 An independent, paper-only program for this workflow:
 
-1. The feed subscribes to the active market's AI/semiconductor universe before approval.
+1. The feed subscribes to the active market's multi-theme universe before approval.
 2. A Custom GPT reads a premarket shortlist through a read-only Action and proposes a plan.
 3. KR is confirmed after 09:10 KST and US after 09:40 ET using regular volume, spread, and VWAP.
 4. The user reviews it and explicitly approves it with a one-time Telegram code.
@@ -216,7 +216,11 @@ and `ne`; pullback state and derived metrics are persisted in SQLite.
 - Every state transition, fill, cancellation, data rejection, and entry rejection
   is written to the audit log with reason codes.
 
-The allowlist is in `config/universe.yaml`. Validation also rejects empty ordinary
+The allowlist is in `config/universe.yaml`. Each market contains 18 symbols and uses
+19 symbols or 38 WebSocket subscriptions after its reference instrument is included.
+The expanded scope adds battery, biotech, defense, power infrastructure, EV/robotics,
+data analytics, cybersecurity, and power themes to the original AI/semiconductor set.
+Candidate records include a `theme` field. Validation also rejects empty ordinary
 rule groups unless explicitly price-only, contradictory conditions, duplicate targets,
 ambiguous indicator names, incomplete
 opening ranges, non-session dates, invalid plan versions/timestamps, and corporate

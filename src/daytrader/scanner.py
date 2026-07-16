@@ -10,7 +10,7 @@ from .repository import Repository
 
 
 class CandidateScanner:
-    """Rank the fixed AI/semiconductor universe from persisted read-only snapshots."""
+    """Rank the fixed multi-theme universe from persisted read-only snapshots."""
 
     def __init__(
         self,
@@ -156,6 +156,7 @@ class CandidateScanner:
                 {
                     "symbol": tick.symbol,
                     "name": metadata["name"],
+                    "theme": metadata.get("theme", "미분류"),
                     "exchange": metadata["exchange"],
                     "score": round(score, 3),
                     "as_of": tick.source_timestamp.isoformat(),

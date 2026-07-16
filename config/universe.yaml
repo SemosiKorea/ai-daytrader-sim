@@ -1,27 +1,38 @@
 KR:
-  "005930": {name: "삼성전자", exchange: "KRX"}
-  "000660": {name: "SK하이닉스", exchange: "KRX"}
-  "042700": {name: "한미반도체", exchange: "KRX"}
-  "000990": {name: "DB하이텍", exchange: "KRX"}
-  "067310": {name: "하나마이크론", exchange: "KRX"}
-  "036540": {name: "SFA반도체", exchange: "KRX"}
-  "095340": {name: "ISC", exchange: "KRX"}
-  "403870": {name: "HPSP", exchange: "KRX"}
-  "036930": {name: "주성엔지니어링", exchange: "KRX"}
-  "240810": {name: "원익IPS", exchange: "KRX"}
-  "091160": {name: "KODEX 반도체", exchange: "KRX"}
+  "005930": {name: "삼성전자", exchange: "KRX", theme: "AI·반도체"}
+  "000660": {name: "SK하이닉스", exchange: "KRX", theme: "AI·반도체"}
+  "042700": {name: "한미반도체", exchange: "KRX", theme: "반도체 장비"}
+  "000990": {name: "DB하이텍", exchange: "KRX", theme: "반도체 파운드리"}
+  "067310": {name: "하나마이크론", exchange: "KRX", theme: "반도체 후공정"}
+  "036540": {name: "SFA반도체", exchange: "KRX", theme: "반도체 후공정"}
+  "095340": {name: "ISC", exchange: "KRX", theme: "반도체 테스트"}
+  "403870": {name: "HPSP", exchange: "KRX", theme: "반도체 장비"}
+  "036930": {name: "주성엔지니어링", exchange: "KRX", theme: "반도체 장비"}
+  "240810": {name: "원익IPS", exchange: "KRX", theme: "반도체 장비"}
+  "091160": {name: "KODEX 반도체", exchange: "KRX", theme: "반도체 ETF"}
+  "373220": {name: "LG에너지솔루션", exchange: "KRX", theme: "2차전지"}
+  "003670": {name: "포스코퓨처엠", exchange: "KRX", theme: "2차전지 소재"}
+  "207940": {name: "삼성바이오로직스", exchange: "KRX", theme: "바이오"}
+  "068270": {name: "셀트리온", exchange: "KRX", theme: "바이오"}
+  "012450": {name: "한화에어로스페이스", exchange: "KRX", theme: "방산·우주항공"}
+  "064350": {name: "현대로템", exchange: "KRX", theme: "방산·철도"}
+  "267260": {name: "HD현대일렉트릭", exchange: "KRX", theme: "전력 인프라"}
 US:
-  NVDA: {name: "NVIDIA", exchange: "NASDAQ"}
-  AMD: {name: "Advanced Micro Devices", exchange: "NASDAQ"}
-  AVGO: {name: "Broadcom", exchange: "NASDAQ"}
-  MU: {name: "Micron Technology", exchange: "NASDAQ"}
-  ARM: {name: "Arm Holdings", exchange: "NASDAQ"}
-  MRVL: {name: "Marvell Technology", exchange: "NASDAQ"}
-  TSM: {name: "Taiwan Semiconductor ADR", exchange: "NYSE"}
-  ASML: {name: "ASML Holding ADR", exchange: "NASDAQ"}
-  AMAT: {name: "Applied Materials", exchange: "NASDAQ"}
-  LRCX: {name: "Lam Research", exchange: "NASDAQ"}
-  QCOM: {name: "Qualcomm", exchange: "NASDAQ"}
-  INTC: {name: "Intel", exchange: "NASDAQ"}
-  SMH: {name: "VanEck Semiconductor ETF", exchange: "NASDAQ"}
-  SOXX: {name: "iShares Semiconductor ETF", exchange: "NASDAQ"}
+  NVDA: {name: "NVIDIA", exchange: "NASDAQ", theme: "AI·반도체"}
+  AMD: {name: "Advanced Micro Devices", exchange: "NASDAQ", theme: "AI·반도체"}
+  AVGO: {name: "Broadcom", exchange: "NASDAQ", theme: "AI 네트워크·반도체"}
+  MU: {name: "Micron Technology", exchange: "NASDAQ", theme: "메모리 반도체"}
+  ARM: {name: "Arm Holdings", exchange: "NASDAQ", theme: "반도체 설계"}
+  MRVL: {name: "Marvell Technology", exchange: "NASDAQ", theme: "데이터센터 반도체"}
+  TSM: {name: "Taiwan Semiconductor ADR", exchange: "NYSE", theme: "반도체 파운드리"}
+  ASML: {name: "ASML Holding ADR", exchange: "NASDAQ", theme: "반도체 장비"}
+  AMAT: {name: "Applied Materials", exchange: "NASDAQ", theme: "반도체 장비"}
+  LRCX: {name: "Lam Research", exchange: "NASDAQ", theme: "반도체 장비"}
+  QCOM: {name: "Qualcomm", exchange: "NASDAQ", theme: "모바일·엣지 반도체"}
+  INTC: {name: "Intel", exchange: "NASDAQ", theme: "반도체"}
+  SMH: {name: "VanEck Semiconductor ETF", exchange: "NASDAQ", theme: "반도체 ETF"}
+  SOXX: {name: "iShares Semiconductor ETF", exchange: "NASDAQ", theme: "반도체 ETF"}
+  TSLA: {name: "Tesla", exchange: "NASDAQ", theme: "전기차·로보틱스"}
+  PLTR: {name: "Palantir Technologies", exchange: "NASDAQ", theme: "AI·데이터 분석"}
+  CRWD: {name: "CrowdStrike Holdings", exchange: "NASDAQ", theme: "사이버보안"}
+  VST: {name: "Vistra", exchange: "NYSE", theme: "전력·데이터센터 에너지"}
