@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -16,6 +17,7 @@ class Settings(BaseSettings):
     app_host: str = "127.0.0.1"
     app_port: int = 8787
     database_path: Path = Path("data/daytrader.db")
+    experiment_data_path: Path = Path("data/experiments")
     gpt_action_bearer: str = "change-me"
     admin_bearer: str = "change-admin"
     market_data_bearer: str = "change-feed"
@@ -31,6 +33,11 @@ class Settings(BaseSettings):
     kis_poll_seconds: float = 1.0
     universe_path: Path = Path("config/universe.yaml")
     costs_path: Path = Path("config/costs.yaml")
+    candidate_snapshot_max_age_seconds: float = 10.0
+    candidate_premarket_max_spread_pct: float = 0.5
+    candidate_regular_max_spread_pct: float = 0.15
+    candidate_regular_relative_volume_min: float = 1.3
+    candidate_open_deviation_pct: float = 1.0
 
     @model_validator(mode="after")
     def validate_bearer_secrets(self) -> "Settings":
@@ -41,12 +48,29 @@ class Settings(BaseSettings):
             raise ValueError("all bearer secrets must be random values of at least 24 characters")
         if len(set(secrets)) != len(secrets):
             raise ValueError("bearer secrets must be different")
+        telegram_values = (self.telegram_bot_token, self.telegram_chat_id)
+        if bool(telegram_values[0]) != bool(telegram_values[1]):
+            raise ValueError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set together")
+        if self.telegram_bot_token and not re.fullmatch(
+            r"[0-9]{6,15}:[A-Za-z0-9_-]{20,80}", self.telegram_bot_token
+        ):
+            raise ValueError("TELEGRAM_BOT_TOKEN has an invalid format")
+        if self.telegram_chat_id and not re.fullmatch(r"-?[0-9]+", self.telegram_chat_id):
+            raise ValueError("TELEGRAM_CHAT_ID must be an integer")
         if self.kis_account_number and (
             len(self.kis_account_number) != 8 or not self.kis_account_number.isdigit()
         ):
             raise ValueError("KIS_ACCOUNT_NUMBER must contain the first eight digits only")
         if len(self.kis_product_code) != 2 or not self.kis_product_code.isdigit():
             raise ValueError("KIS_PRODUCT_CODE must contain two digits")
+        if self.candidate_snapshot_max_age_seconds <= 0:
+            raise ValueError("CANDIDATE_SNAPSHOT_MAX_AGE_SECONDS must be positive")
+        if not 0 < self.candidate_regular_max_spread_pct <= self.candidate_premarket_max_spread_pct:
+            raise ValueError("candidate spread limits are invalid")
+        if not 0 < self.candidate_regular_relative_volume_min <= 10:
+            raise ValueError("candidate relative-volume threshold is invalid")
+        if not 0 < self.candidate_open_deviation_pct <= 10:
+            raise ValueError("candidate opening deviation threshold is invalid")
         return self
 
 

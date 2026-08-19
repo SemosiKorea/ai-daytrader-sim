@@ -1,11 +1,42 @@
 openapi: 3.1.0
 info:
-  title: AI Day Trader Plan Approval
-  version: 2.1.0
-  description: Registers an explicitly user-approved plan for paper trading only.
+  title: Multi-Theme Day Trader Plan Approval
+  version: 2.4.1
+  description: Reads fresh multi-theme candidates and registers explicitly approved paper plans only.
 servers:
-  - url: https://trade.example.com
+  - url: https://evict-smell-chug.ngrok-free.dev
 paths:
+  /v1/gpt-actions/candidates:
+    get:
+      operationId: getDayTradeCandidates
+      summary: "Required first step: read current KR or US day-trade candidates."
+      description: "Always call this before naming any symbol. For Korean requests use market=KR, phase=auto, limit=3; for US requests use market=US, phase=auto, limit=3."
+      x-openai-isConsequential: false
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: market
+          required: true
+          description: Use KR for Korean-stock requests and US for US-stock requests.
+          schema: {type: string, enum: [KR, US]}
+        - in: query
+          name: phase
+          required: false
+          description: Use auto unless the user explicitly requests a diagnostic phase.
+          schema: {type: string, enum: [auto, premarket, regular], default: auto}
+        - in: query
+          name: limit
+          required: false
+          description: The GPT must request at most three candidates.
+          schema: {type: integer, minimum: 1, maximum: 3, default: 3}
+      responses:
+        '200':
+          description: Read-only candidate ranking. It never arms a plan.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CandidateScanResponse'
   /v1/gpt-actions/plans:
     post:
       operationId: registerApprovedPaperTradePlan
@@ -43,7 +74,66 @@ paths:
           description: Current plan status.
           content:
             application/json:
-              schema: {type: object, additionalProperties: true}
+              schema:
+                $ref: '#/components/schemas/PlanStatusResponse'
+  /v1/gpt-actions/experiments:
+    post:
+      operationId: registerPortfolioComparisonExperiment
+      summary: Start three isolated paper-only cohorts after explicit user selection and OTP approval.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PortfolioExperimentRequest'
+      responses:
+        '201':
+          description: Comparison experiment started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortfolioExperimentReceipt'
+        '409': {description: Invalid/reused OTP or duplicate experiment.}
+        '422': {description: Experiment rejected by deterministic validation.}
+  /v1/gpt-actions/experiments/{experiment_id}:
+    get:
+      operationId: getPortfolioComparisonExperiment
+      summary: Read allocation, portfolio, and performance for all three paper cohorts.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: experiment_id
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Current experiment comparison.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                required: [experiment_id, status, market, trade_date, candidate_symbols,
+                  user_selected_symbols, cohorts, comparison]
+                properties:
+                  experiment_id: {type: string}
+                  status: {type: string}
+                  market: {type: string, enum: [KR, US]}
+                  trade_date: {type: string, format: date}
+                  candidate_symbols: {type: array, items: {type: string}}
+                  user_selected_symbols: {type: array, items: {type: string}}
+                  cohorts:
+                    type: object
+                    additionalProperties: false
+                    required: [GPT_ALL_EQUAL, USER_FIXED_SLEEVE, USER_REALLOCATED]
+                    properties:
+                      GPT_ALL_EQUAL: {$ref: '#/components/schemas/CohortResult'}
+                      USER_FIXED_SLEEVE: {$ref: '#/components/schemas/CohortResult'}
+                      USER_REALLOCATED: {$ref: '#/components/schemas/CohortResult'}
+                  comparison: {$ref: '#/components/schemas/ExperimentComparison'}
 components:
   securitySchemes:
     bearerAuth:
@@ -68,6 +158,112 @@ components:
           minItems: 1
           maxItems: 3
           items: {$ref: '#/components/schemas/Candidate'}
+    PortfolioExperimentRequest:
+      type: object
+      additionalProperties: false
+      required: [experiment_id, created_at, market, trade_date, expires_at,
+        approval_nonce, candidates, user_selected_symbols]
+      properties:
+        experiment_id: {type: string, pattern: '^[A-Za-z0-9_-]{8,48}$'}
+        created_at: {type: string, format: date-time}
+        market: {type: string, enum: [KR, US]}
+        trade_date: {type: string, format: date}
+        expires_at: {type: string, format: date-time}
+        approval_nonce: {type: string, pattern: '^\d{6}$'}
+        candidates:
+          type: array
+          minItems: 1
+          maxItems: 3
+          items: {$ref: '#/components/schemas/Candidate'}
+        user_selected_symbols:
+          type: array
+          minItems: 1
+          maxItems: 3
+          items: {type: string}
+    PortfolioExperimentReceipt:
+      type: object
+      additionalProperties: false
+      required: [experiment_id, status, cohorts, message]
+      properties:
+        experiment_id: {type: string}
+        status: {type: string, enum: [ACTIVE]}
+        cohorts:
+          type: array
+          items:
+            type: string
+            enum: [GPT_ALL_EQUAL, USER_FIXED_SLEEVE, USER_REALLOCATED]
+        message: {type: string}
+    CohortResult:
+      type: object
+      additionalProperties: true
+      required: [plan_status, allocation, portfolio, performance]
+      properties:
+        plan_status: {type: string}
+        allocation: {$ref: '#/components/schemas/AllocationResult'}
+        portfolio: {$ref: '#/components/schemas/ExperimentPortfolio'}
+        performance: {$ref: '#/components/schemas/ExperimentPerformance'}
+    AllocationResult:
+      type: object
+      additionalProperties: true
+      required: [quantities, target_weights, estimated_invested, estimated_cash]
+      properties:
+        quantities:
+          type: object
+          additionalProperties: {type: integer}
+          properties:
+            example_symbol: {type: integer}
+        target_weights:
+          type: object
+          additionalProperties: {type: number}
+          properties:
+            example_symbol: {type: number}
+        estimated_invested: {type: number}
+        estimated_cash: {type: number}
+    ExperimentPortfolio:
+      type: object
+      additionalProperties: true
+      required: [market, cash, equity, realized_pnl, positions, pending_orders]
+      properties:
+        market: {type: string, enum: [KR, US]}
+        cash: {type: number}
+        equity: {type: number}
+        realized_pnl: {type: number}
+        positions:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              symbol: {type: string}
+              remaining: {type: integer}
+        pending_orders:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              symbol: {type: string}
+              state: {type: string}
+    ExperimentPerformance:
+      type: object
+      additionalProperties: true
+      required: [market, closed_trades, net_pnl, realized_net_pnl, max_drawdown_pct]
+      properties:
+        market: {type: string, enum: [KR, US]}
+        closed_trades: {type: integer}
+        net_pnl: {type: number}
+        realized_net_pnl: {type: number}
+        profit_factor: {type: [number, 'null']}
+        max_drawdown_pct: {type: number}
+    ExperimentComparison:
+      type: object
+      additionalProperties: true
+      properties:
+        user_fixed_minus_gpt_all_net_pnl: {type: number}
+        user_reallocated_minus_gpt_all_net_pnl: {type: number}
+        concentration_effect_net_pnl: {type: number}
+        selection_uplift_per_trade: {type: [number, 'null']}
+        selection_uplift_return_pct: {type: [number, 'null']}
     Candidate:
       type: object
       additionalProperties: false
@@ -102,6 +298,7 @@ components:
         force_exit_time: {type: string, format: time}
         exit_policy: {$ref: '#/components/schemas/ExitPolicy'}
         pullback_rebreak: {$ref: '#/components/schemas/PullbackRebreak'}
+        premarket_guard: {$ref: '#/components/schemas/PremarketGuard'}
     Entry:
       type: object
       additionalProperties: false
@@ -126,7 +323,49 @@ components:
         groups:
           type: array
           maxItems: 4
-          items: {$ref: '#/components/schemas/RuleGroup'}
+          items: {$ref: '#/components/schemas/RuleGroupLevel2'}
+    RuleGroupLevel2:
+      type: object
+      additionalProperties: false
+      required: [mode, predicates, groups]
+      properties:
+        mode: {type: string, enum: [all, any]}
+        predicates:
+          type: array
+          maxItems: 12
+          items: {$ref: '#/components/schemas/Predicate'}
+        groups:
+          type: array
+          maxItems: 4
+          items: {$ref: '#/components/schemas/RuleGroupLevel3'}
+    RuleGroupLevel3:
+      type: object
+      additionalProperties: false
+      required: [mode, predicates, groups]
+      properties:
+        mode: {type: string, enum: [all, any]}
+        predicates:
+          type: array
+          maxItems: 12
+          items: {$ref: '#/components/schemas/Predicate'}
+        groups:
+          type: array
+          maxItems: 4
+          items: {$ref: '#/components/schemas/RuleGroupLevel4'}
+    RuleGroupLevel4:
+      type: object
+      additionalProperties: false
+      required: [mode, predicates, groups]
+      properties:
+        mode: {type: string, enum: [all, any]}
+        predicates:
+          type: array
+          maxItems: 12
+          items: {$ref: '#/components/schemas/Predicate'}
+        groups:
+          type: array
+          maxItems: 0
+          items: {type: string}
     Predicate:
       type: object
       additionalProperties: false
@@ -134,7 +373,9 @@ components:
       properties:
         indicator:
           type: string
-          enum: [last, bid, ask, spread_pct, previous_open, previous_high,
+          enum: [last, bid, ask, spread_pct, regular_open_price, premarket_open,
+            premarket_high, premarket_low, premarket_last, premarket_vwap,
+            premarket_volume, premarket_gap_pct, previous_open, previous_high,
             previous_low, previous_close, opening_range_5_high, opening_range_5_low,
             opening_range_10_high, opening_range_10_low, opening_range_15_high,
             opening_range_15_low, vwap_regular, atr_14_1m_regular,
@@ -177,11 +418,94 @@ components:
         rebreak_relative_volume_min: {type: number, minimum: 0.1, maximum: 10, default: 1.3}
         spread_pct_max: {type: number, exclusiveMinimum: 0, maximum: 2, default: 0.15}
         require_market_above_vwap: {type: boolean, default: true}
+    PremarketGuard:
+      type: object
+      additionalProperties: false
+      required: [reference_price]
+      properties:
+        reference_price: {type: number, exclusiveMinimum: 0}
+        max_open_deviation_pct: {type: number, exclusiveMinimum: 0, maximum: 10, default: 1}
+        max_spread_pct: {type: number, exclusiveMinimum: 0, maximum: 2, default: 0.15}
+        relative_volume_min: {type: number, exclusiveMinimum: 0, maximum: 10, default: 1.3}
+        require_above_vwap: {type: boolean, default: true}
+        require_market_above_vwap: {type: boolean, default: true}
+    CandidateScanResponse:
+      type: object
+      additionalProperties: false
+      required: [market, trade_date, phase, status, as_of, window, execution_note,
+        candidates, exclusions]
+      properties:
+        market: {type: string, enum: [KR, US]}
+        trade_date: {type: string, format: date}
+        phase: {type: string, enum: [premarket, regular, closed]}
+        status: {type: string}
+        as_of: {type: string, format: date-time}
+        window:
+          type: object
+          additionalProperties: true
+          properties:
+            status: {type: string}
+            phase: {type: string}
+            premarket_scan_start: {type: string, format: date-time}
+            candidate_selection_end: {type: string, format: date-time}
+            regular_open: {type: string, format: date-time}
+            regular_confirmation_at: {type: string, format: date-time}
+            regular_close: {type: string, format: date-time}
+        execution_note: {type: string}
+        candidates:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            required: [symbol, name, theme, exchange, score, as_of, session, quote_scope,
+              last, bid, ask, spread_pct, indicators, premarket_guard_template]
+            properties:
+              symbol: {type: string}
+              name: {type: string}
+              theme: {type: string}
+              exchange: {type: string}
+              score: {type: number}
+              as_of: {type: string, format: date-time}
+              session: {type: string}
+              quote_scope: {type: string}
+              last: {type: number}
+              bid: {type: number}
+              ask: {type: number}
+              spread_pct: {type: number}
+              bid_size: {type: integer}
+              ask_size: {type: integer}
+              indicators:
+                type: object
+                additionalProperties: true
+                properties: {}
+              premarket_guard_template: {$ref: '#/components/schemas/PremarketGuard'}
+        exclusions:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [symbol, reasons]
+            properties:
+              symbol: {type: string}
+              reasons: {type: array, items: {type: string}}
     PlanReceipt:
       type: object
+      additionalProperties: false
       required: [plan_id, status, content_hash, message]
       properties:
         plan_id: {type: string}
         status: {type: string}
         content_hash: {type: string}
         message: {type: string}
+    PlanStatusResponse:
+      type: object
+      required: [plan_id, plan_version, market, trade_date, status, content_hash]
+      properties:
+        plan_id: {type: string}
+        plan_version: {type: integer}
+        market: {type: string, enum: [KR, US]}
+        trade_date: {type: string, format: date}
+        status:
+          type: string
+          enum: [VALIDATED, ARMED, RUNNING, COMPLETED, EXPIRED, REJECTED, CANCELLED, RISK_BLOCKED]
+        content_hash: {type: string}

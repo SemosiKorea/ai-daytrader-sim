@@ -32,7 +32,18 @@ class FeedState:
     context_reset: bool = False
 
 
+@dataclass
+class RejectionAggregate:
+    first_seen: datetime
+    last_seen: datetime
+    last_logged_at: datetime
+    count: int
+    last_tick: MarketTick
+
+
 class TradingEngine:
+    DATA_REJECTION_LOG_INTERVAL = timedelta(seconds=60)
+
     def __init__(self, repository: Repository, broker: PaperBroker):
         self.repository = repository
         self.broker = broker
@@ -40,6 +51,9 @@ class TradingEngine:
         self.previous_context: dict[tuple[Market, str], dict] = {}
         self.feed_states: dict[tuple[Market, str], FeedState] = {}
         self.cross_states: dict[tuple[str, str], dict[str, CrossDebounceState]] = {}
+        self.rejection_aggregates: dict[
+            tuple[Market, str, tuple[str, ...]], RejectionAggregate
+        ] = {}
         self.pullback = PullbackRebreakEngine(repository)
 
     @staticmethod
@@ -125,6 +139,67 @@ class TradingEngine:
                 reasons.append("SEQUENCE_REVERSED")
         return reasons
 
+    def _log_data_rejection(self, tick: MarketTick, reasons: list[str]) -> None:
+        if reasons != ["STALE_DATA"]:
+            self._log_rejection(tick, None, reasons, "DATA_REJECTED")
+            return
+        now = datetime.now(UTC)
+        key = (tick.market, tick.symbol.upper(), tuple(reasons))
+        aggregate = self.rejection_aggregates.get(key)
+        if aggregate is None:
+            self.rejection_aggregates[key] = RejectionAggregate(
+                first_seen=now,
+                last_seen=now,
+                last_logged_at=now,
+                count=1,
+                last_tick=tick,
+            )
+            self._log_rejection(
+                tick,
+                None,
+                reasons,
+                "DATA_REJECTED",
+                {"aggregate_count": 1, "aggregation": "initial"},
+            )
+            return
+        aggregate.last_seen = now
+        aggregate.last_tick = tick
+        aggregate.count += 1
+        if now - aggregate.last_logged_at < self.DATA_REJECTION_LOG_INTERVAL:
+            return
+        self._log_rejection(
+            aggregate.last_tick,
+            None,
+            reasons,
+            "DATA_REJECTED_SUMMARY",
+            {
+                "aggregate_count": aggregate.count,
+                "aggregate_window_started_at": aggregate.first_seen,
+                "aggregate_window_ended_at": aggregate.last_seen,
+            },
+        )
+        aggregate.first_seen = now
+        aggregate.last_logged_at = now
+        aggregate.count = 0
+
+    def _flush_stale_rejection_aggregate(self, tick: MarketTick) -> None:
+        key = (tick.market, tick.symbol.upper(), ("STALE_DATA",))
+        aggregate = self.rejection_aggregates.pop(key, None)
+        if aggregate is None or aggregate.count <= 1:
+            return
+        self._log_rejection(
+            aggregate.last_tick,
+            None,
+            ["STALE_DATA"],
+            "DATA_REJECTED_SUMMARY",
+            {
+                "aggregate_count": aggregate.count,
+                "aggregate_window_started_at": aggregate.first_seen,
+                "aggregate_window_ended_at": aggregate.last_seen,
+                "aggregation": "flushed_on_recovery",
+            },
+        )
+
     def _update_feed_state(self, tick: MarketTick) -> FeedState:
         key = (tick.market, tick.symbol.upper())
         source = tick.source_timestamp or tick.timestamp
@@ -200,6 +275,69 @@ class TradingEngine:
         local_time = source.astimezone(MARKET_TZ[tick.market]).time().replace(tzinfo=None)
         return candidate.entry.start_time <= local_time <= candidate.entry.end_time
 
+    def _premarket_guard_reasons(
+        self, plan: TradePlan, candidate: CandidatePlan, tick: MarketTick
+    ) -> list[str]:
+        guard = candidate.premarket_guard
+        if guard is None:
+            return []
+        existing = self.repository.candidate_guard_state(plan.plan_id, candidate.symbol)
+        if existing:
+            return [f"CANDIDATE_RISK_BLOCKED:{existing['reason']}"]
+        if not tick.indicator_ready.get("regular_open_price", False):
+            return ["REGULAR_OPEN_NOT_READY"]
+        opening_price = float(tick.indicators["regular_open_price"])
+        deviation = abs(opening_price - guard.reference_price) / guard.reference_price * 100
+        if deviation > guard.max_open_deviation_pct:
+            payload = {
+                "reference_price": guard.reference_price,
+                "regular_open_price": opening_price,
+                "open_deviation_pct": deviation,
+                "max_open_deviation_pct": guard.max_open_deviation_pct,
+            }
+            self.repository.block_candidate(
+                plan.plan_id,
+                candidate.symbol,
+                tick.market,
+                "OPEN_DEVIATION_EXCEEDED",
+                payload,
+            )
+            self.repository.add_event(
+                "CANDIDATE_RISK_BLOCKED",
+                tick.market,
+                candidate.symbol,
+                plan.plan_id,
+                {"reason": "OPEN_DEVIATION_EXCEEDED", **payload},
+            )
+            blocked = {
+                state["symbol"]
+                for state in self.repository.candidate_guard_states(plan.plan_id)
+            }
+            if blocked.issuperset({item.symbol for item in plan.approved_symbols}):
+                self.repository.set_plan_status(plan.plan_id, PlanStatus.RISK_BLOCKED)
+            return ["OPEN_DEVIATION_EXCEEDED"]
+        reasons: list[str] = []
+        spread = (tick.ask - tick.bid) / tick.last * 100
+        if spread > guard.max_spread_pct:
+            reasons.append("REGULAR_SPREAD_CONFIRMATION_FAILED")
+        relative_name = "relative_volume_cumulative_20d_same_time_regular"
+        if not tick.indicator_ready.get(relative_name, False):
+            reasons.append("REGULAR_RELATIVE_VOLUME_NOT_READY")
+        elif float(tick.indicators[relative_name]) < guard.relative_volume_min:
+            reasons.append("REGULAR_RELATIVE_VOLUME_TOO_LOW")
+        if guard.require_above_vwap:
+            if not tick.indicator_ready.get("vwap_regular", False):
+                reasons.append("REGULAR_VWAP_NOT_READY")
+            elif tick.last <= float(tick.indicators["vwap_regular"]):
+                reasons.append("PRICE_NOT_ABOVE_REGULAR_VWAP")
+        if guard.require_market_above_vwap:
+            market_name = "market_above_vwap_regular"
+            if not tick.indicator_ready.get(market_name, False):
+                reasons.append("MARKET_VWAP_NOT_READY")
+            elif not bool(tick.indicators[market_name]):
+                reasons.append("MARKET_NOT_ABOVE_VWAP")
+        return reasons
+
     def _try_entry(
         self, plan: TradePlan, candidate: CandidatePlan, tick: MarketTick, feed: FeedState
     ) -> None:
@@ -232,6 +370,9 @@ class TradingEngine:
             reasons.append("SPREAD_TOO_WIDE")
         if candidate.strategy_type == "rules" and tick.last < candidate.entry.trigger_price:
             reasons.append("TRIGGER_NOT_REACHED")
+        if tick.ask > candidate.entry.limit_price:
+            reasons.append("MAX_BUY_LIMIT_EXCEEDED")
+        reasons.extend(self._premarket_guard_reasons(plan, candidate, tick))
         reasons.extend(self._indicators_ready(candidate, tick))
         if reasons:
             self._log_rejection(tick, plan.plan_id, reasons)
@@ -372,15 +513,21 @@ class TradingEngine:
         tick.symbol = tick.symbol.upper()
         feed_errors = self._validate_feed(tick)
         if feed_errors:
-            self._log_rejection(tick, None, feed_errors, "DATA_REJECTED")
+            if feed_errors != ["STALE_DATA"]:
+                self._flush_stale_rejection_aggregate(tick)
+            self._log_data_rejection(tick, feed_errors)
             return {"accepted": False, "reasons": feed_errors}
+        self._flush_stale_rejection_aggregate(tick)
         feed = self._update_feed_state(tick)
         key = (tick.market, tick.symbol)
         self.latest_ticks[key] = tick
         local_date = (tick.source_timestamp or tick.timestamp).astimezone(
             MARKET_TZ[tick.market]
         ).date()
+        self.repository.save_market_snapshot(tick, local_date)
         plans = self.repository.active_plans(tick.market, local_date)
+        if tick.session != "regular":
+            return {"accepted": True, "action": "SNAPSHOT_RECORDED", "session": tick.session}
         if feed.context_reset:
             for plan in plans:
                 for candidate in plan.approved_symbols:
@@ -459,13 +606,86 @@ class TradingEngine:
             self.previous_context[key] = self.context(tick)
         return {"accepted": True}
 
-    def force_close_market(self, market: Market, reason: str = "SESSION_FORCE_CLOSE") -> None:
+    def force_close_market(
+        self,
+        market: Market,
+        reason: str = "SESSION_FORCE_CLOSE",
+        now: datetime | None = None,
+    ) -> dict[str, list[str]]:
+        now = (now or datetime.now(UTC)).astimezone(UTC)
+        policy = self.broker.costs[market.value]
         ticks = {
             symbol: tick
             for (tick_market, symbol), tick in self.latest_ticks.items()
             if tick_market == market
+            and tick.market_status == "open"
+            and tick.symbol_status == "trading"
+            and tick.bid <= tick.ask
+            and 0
+            <= (
+                now - (tick.source_timestamp or tick.timestamp).astimezone(UTC)
+            ).total_seconds()
+            <= policy.max_tick_age_seconds
         }
         self.broker.force_close(market, ticks, reason)
+        portfolio = self.broker.portfolios[market]
+        missing = sorted(set(portfolio.positions) - set(ticks))
+        if missing:
+            self.repository.add_event(
+                "UNPRICED_FORCE_CLOSE_PENDING",
+                market,
+                None,
+                None,
+                {"reason": reason, "symbols": missing},
+            )
+        return {"priced_symbols": sorted(ticks), "unpriced_symbols": missing}
+
+    def recovery_force_close_market(
+        self, market: Market, trade_date, reason: str = "RECOVERY_LAST_KNOWN_QUOTE"
+    ) -> bool:
+        ticks = {
+            tick.symbol.upper(): tick
+            for tick in self.repository.market_snapshots(market, trade_date, "regular")
+        }
+        self.broker.recovery_force_close(market, ticks, reason)
+        portfolio = self.broker.view(market)
+        fully_closed = not portfolio["positions"] and not portfolio["pending_orders"]
+        if fully_closed:
+            for plan in self.repository.active_plans(market, trade_date):
+                self.repository.set_plan_status(plan.plan_id, PlanStatus.COMPLETED)
+        else:
+            self.repository.add_event(
+                "RECOVERY_FORCE_CLOSE_REQUIRED",
+                market,
+                None,
+                None,
+                {
+                    "trade_date": trade_date,
+                    "symbols": [item["symbol"] for item in portfolio["positions"]],
+                },
+            )
+        return fully_closed
+
+    def recover_expired_state(self) -> None:
+        now = datetime.now(UTC)
+        for market, portfolio in self.broker.portfolios.items():
+            trade_dates = set()
+            for position in portfolio.positions.values():
+                row = self.repository.get_plan(position.plan_id)
+                if row:
+                    plan = TradePlan.model_validate_json(row["payload"])
+                    if plan.expires_at.astimezone(UTC) <= now:
+                        trade_dates.add(plan.trade_date)
+            for order in portfolio.pending_orders.values():
+                row = self.repository.get_plan(order.plan_id)
+                if row:
+                    plan = TradePlan.model_validate_json(row["payload"])
+                    if plan.expires_at.astimezone(UTC) <= now:
+                        trade_dates.add(plan.trade_date)
+            for trade_date in sorted(trade_dates):
+                self.recovery_force_close_market(
+                    market, trade_date, "RESTART_AFTER_PLAN_EXPIRY"
+                )
 
     def maintenance(self) -> None:
         self.broker.expire_pending(datetime.now(UTC))

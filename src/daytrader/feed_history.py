@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -61,8 +62,28 @@ class FeedHistoryStore:
         return connection
 
     def save(self, bar: MinuteBar) -> None:
+        self.save_many((bar,))
+
+    def save_many(self, bars: Iterable[MinuteBar]) -> int:
+        """Upsert bars in one transaction and return the number presented."""
+        rows = [
+            (
+                bar.market.value,
+                bar.symbol.upper(),
+                bar.start.isoformat(),
+                bar.open,
+                bar.high,
+                bar.low,
+                bar.close,
+                bar.volume,
+                bar.notional,
+            )
+            for bar in bars
+        ]
+        if not rows:
+            return 0
         with self._lock, self._connect() as db:
-            db.execute(
+            db.executemany(
                 """
                 INSERT INTO minute_bars(
                     market, symbol, start, open, high, low, close, volume, notional
@@ -75,18 +96,9 @@ class FeedHistoryStore:
                     volume=excluded.volume,
                     notional=excluded.notional
                 """,
-                (
-                    bar.market.value,
-                    bar.symbol.upper(),
-                    bar.start.isoformat(),
-                    bar.open,
-                    bar.high,
-                    bar.low,
-                    bar.close,
-                    bar.volume,
-                    bar.notional,
-                ),
+                rows,
             )
+        return len(rows)
 
     def load(self, market: Market, symbol: str, limit: int = 20_000) -> list[MinuteBar]:
         with self._connect() as db:
@@ -248,7 +260,17 @@ class IndicatorCalculator:
         self.completed.append(self.current)
         self.current = None
 
-    def on_trade(self, price: float, size: int, at: datetime) -> None:
+    def on_trade(
+        self,
+        price: float,
+        size: int,
+        at: datetime,
+        *,
+        opening_price: float | None = None,
+        high: float | None = None,
+        low: float | None = None,
+        notional: float | None = None,
+    ) -> None:
         local = at.astimezone(MARKET_TZ[self.market])
         trade_date = local.date()
         if not is_session(self.market, trade_date):
@@ -267,32 +289,31 @@ class IndicatorCalculator:
                 market=self.market,
                 symbol=self.symbol,
                 start=minute,
-                open=price,
+                open=opening_price if opening_price is not None else price,
                 high=price,
                 low=price,
                 close=price,
                 volume=0,
                 notional=0.0,
             )
-        self.current.high = max(self.current.high, price)
-        self.current.low = min(self.current.low, price)
+        self.current.high = max(self.current.high, high if high is not None else price)
+        self.current.low = min(self.current.low, low if low is not None else price)
         self.current.close = price
         quantity = max(0, size)
+        trade_notional = max(0.0, notional) if notional is not None else price * quantity
         self.current.volume += quantity
-        self.current.notional += price * quantity
+        self.current.notional += trade_notional
         self.session_volume += quantity
-        self.session_notional += price * quantity
+        self.session_notional += trade_notional
         session_open, _ = session_bounds(self.market, trade_date)
         if minute == session_open and self.first_trade is None:
-            self.first_trade = price
+            self.first_trade = opening_price if opening_price is not None else price
 
     def _sessions(self) -> list[date]:
         return sorted({self._bar_date(bar) for bar in self.completed})
 
-    def _previous_session_bars(self) -> list[MinuteBar]:
-        if self.session_date is None:
-            return []
-        prior = [value for value in self._sessions() if value < self.session_date]
+    def _previous_session_bars(self, reference_date: date) -> list[MinuteBar]:
+        prior = [value for value in self._sessions() if value < reference_date]
         if not prior:
             return []
         previous_date = prior[-1]
@@ -371,6 +392,12 @@ class IndicatorCalculator:
             self.session_volume > 0,
             local,
         )
+        add(
+            "regular_open_price",
+            self.first_trade,
+            self.session_date == local.date() and self.first_trade is not None,
+            local,
+        )
         add("ema_9_1m_regular", _ema(closes, 9), len(closes) >= 9, last_bar_at)
         add("ema_20_1m_regular", _ema(closes, 20), len(closes) >= 20, last_bar_at)
         add("ema_50_1m_regular", _ema(closes, 50), len(closes) >= 50, last_bar_at)
@@ -401,7 +428,7 @@ class IndicatorCalculator:
             add(f"opening_range_{minutes}_high", high, range_ready, generated_at)
             add(f"opening_range_{minutes}_low", low, range_ready, generated_at)
 
-        previous = self._previous_session_bars()
+        previous = self._previous_session_bars(local.date())
         previous_at = previous[-1].end if previous else local
         add("previous_open", previous[0].open if previous else None, bool(previous), previous_at)
         add(

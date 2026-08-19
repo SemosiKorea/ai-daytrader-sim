@@ -113,9 +113,17 @@ def test_paper_fill_targets_and_restart_persistence(tmp_path) -> None:
     broker.on_tick(
         _tick(102, timestamp=started + timedelta(seconds=1), bid=102, ask=102.01)
     )
+    assert broker.portfolios[Market.US].positions["NVDA"].remaining == 5
+    broker.on_tick(
+        _tick(102, timestamp=started + timedelta(seconds=1.4), bid=102, ask=102.01)
+    )
     assert broker.portfolios[Market.US].positions["NVDA"].remaining == 2
     broker.on_tick(
         _tick(104, timestamp=started + timedelta(seconds=2), bid=104, ask=104.01)
+    )
+    assert broker.portfolios[Market.US].positions["NVDA"].remaining == 2
+    broker.on_tick(
+        _tick(104, timestamp=started + timedelta(seconds=2.4), bid=104, ask=104.01)
     )
     assert not broker.portfolios[Market.US].positions
     assert broker.performance(Market.US)["closed_trades"] == 1

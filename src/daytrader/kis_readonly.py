@@ -3,13 +3,16 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from .engine import MARKET_TZ, TradingEngine
 from .models import Market, MarketTick
 from .repository import Repository
+
+if TYPE_CHECKING:
+    from .experiment import PortfolioExperimentManager
 
 logger = logging.getLogger(__name__)
 
@@ -152,12 +155,14 @@ class KISQuotePoller:
         engine: TradingEngine,
         universe: dict[str, dict[str, dict[str, str]]],
         interval_seconds: float = 1.0,
+        experiment_manager: "PortfolioExperimentManager | None" = None,
     ):
         self.client = client
         self.repository = repository
         self.engine = engine
         self.universe = universe
         self.interval_seconds = max(interval_seconds, 0.5)
+        self.experiment_manager = experiment_manager
         self._task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
@@ -173,22 +178,35 @@ class KISQuotePoller:
         except asyncio.CancelledError:
             pass
 
+    async def poll_once(self) -> None:
+        for market in Market:
+            local_date = datetime.now(MARKET_TZ[market]).date()
+            candidates: dict[str, Any] = {}
+            for plan in self.repository.active_plans(market, local_date):
+                for candidate in plan.approved_symbols:
+                    candidates[candidate.symbol] = candidate
+            for experiment in self.repository.active_portfolio_experiments(
+                market, local_date
+            ):
+                for candidate in experiment.candidates:
+                    candidates[candidate.symbol] = candidate
+            for candidate in candidates.values():
+                try:
+                    tick = await self.client.quote(
+                        market, candidate.symbol, candidate.exchange
+                    )
+                    self.engine.process_tick(tick)
+                    if self.experiment_manager:
+                        self.experiment_manager.process_tick(tick)
+                except Exception as exc:  # keep other approved symbols running
+                    logger.warning(
+                        "KIS quote failed for %s:%s: %s",
+                        market.value,
+                        candidate.symbol,
+                        exc,
+                    )
+
     async def run(self) -> None:
         while True:
-            for market in Market:
-                local_date = datetime.now(MARKET_TZ[market]).date()
-                for plan in self.repository.active_plans(market, local_date):
-                    for candidate in plan.approved_symbols:
-                        try:
-                            tick = await self.client.quote(
-                                market, candidate.symbol, candidate.exchange
-                            )
-                            self.engine.process_tick(tick)
-                        except Exception as exc:  # keep other approved symbols running
-                            logger.warning(
-                                "KIS quote failed for %s:%s: %s",
-                                market.value,
-                                candidate.symbol,
-                                exc,
-                            )
+            await self.poll_once()
             await asyncio.sleep(self.interval_seconds)

@@ -258,6 +258,7 @@ def test_paper_broker_records_entry_cancel_and_exit_intents(tmp_path) -> None:
 def test_settings_reject_any_runtime_live_order_mode() -> None:
     with pytest.raises(ValidationError, match="kis_order_mode"):
         Settings(
+            _env_file=None,
             gpt_action_bearer="g" * 24,
             admin_bearer="a" * 24,
             market_data_bearer="m" * 24,

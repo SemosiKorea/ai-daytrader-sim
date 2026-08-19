@@ -30,10 +30,14 @@ FEED_HISTORY_PATH=data/feed_history.db
 FEED_TARGET_URL=http://127.0.0.1:8787/v1/market-data/ticks
 FEED_DISCOVERY_SECONDS=5.0
 FEED_QUOTE_MAX_AGE_SECONDS=3.0
+FEED_EMIT_INTERVAL_MS=200
 FEED_US_QUOTE_SCOPE=venue
 FEED_OVERSEAS_TR_KEY_PREFIX=D
 FEED_REFERENCE_KR=069500:KRX
 FEED_REFERENCE_US=QQQ:NASDAQ
+FEED_SCAN_PREMARKET_MINUTES_KR=30
+FEED_SCAN_PREMARKET_MINUTES_US=60
+FEED_SCAN_REGULAR_MINUTES=120
 ```
 
 해외 실시간 시세의 모의 환경 지원 범위는 KIS 상품별로 다를 수 있습니다.
@@ -57,15 +61,29 @@ uv run daytrader-sim
 uv run daytrader-feed
 ```
 
-피드는 SQLite에서 당일 `ARMED` 또는 `RUNNING` 계획을 5초마다 확인합니다.
-대상 종목이 바뀌면 WebSocket을 재연결하고 새 종목의 체결·호가를 구독합니다.
-시장 기준 종목도 함께 구독해 `market_above_vwap_regular`을 계산합니다.
+피드는 승인된 계획의 종목을 항상 구독합니다. 이와 별도로 한국 정규장 30분 전,
+미국 정규장 60분 전부터 `config/universe.yaml`의 해당 시장 전체 종목을 승인 전에
+구독하고, 개장 후 기본 120분까지 후보 확인용 데이터를 수집합니다. 각 시장은
+허용 종목 18개와 기준 종목 1개로 구성되어 호가·체결 합계 38개를 구독합니다.
+두 시장을 시간대별로 나눠 KIS WebSocket의 연결당 40개 구독 한도를 넘지 않습니다.
+대상 종목이 바뀌면 WebSocket을 재연결하며 시장 기준 종목도 함께 구독해
+`market_above_vwap_regular`을 계산합니다.
+
+WebSocket 수신은 지표 계산과 HTTP 전송을 기다리지 않습니다. 종목별 최신 호가와
+최신 체결만 보관하고 기본 200ms 간격으로 병합하며, 양쪽이 모두 갱신된 경우에만
+스냅샷을 전송합니다. 처리 대기 중 3초를 넘긴 레코드는 서버로 보내지 않고
+폐기합니다. `FEED_EMIT_INTERVAL_MS`는 100~250ms 범위에서만 설정할 수 있습니다.
+시뮬레이터도 동일한 `STALE_DATA`를 틱마다 저장하지 않고 60초 단위로 집계합니다.
 
 ## 계산 및 저장
 
 체결 데이터로 정규장 1분봉과 정확한 거래대금 합계를 구성합니다. 완성된 봉은
 `FEED_HISTORY_PATH`의 SQLite에 저장됩니다. 재시작하면 저장된 봉으로 EMA, RSI,
 ATR, 최근 5봉, 전일 OHLC를 복구합니다.
+
+장전 체결은 `premarket_open/high/low/last/vwap/volume/gap_pct`로 별도 저장하고
+정규장 EMA·RSI·ATR·VWAP 계산에는 넣지 않습니다. API는 장전과 정규장 최신
+스냅샷을 SQLite의 서로 다른 세션 행에 보존합니다.
 
 당일 데이터로 다음을 계산합니다.
 
@@ -84,7 +102,35 @@ ATR, 최근 5봉, 전일 OHLC를 복구합니다.
 - 최근 완성봉 거래량
 - 최근 20거래일 동일 경과시각 평균 대비 상대 거래량
 
-## 과거 분봉 가져오기
+## KIS에서 미국 20거래일 분봉 자동 적재
+
+KIS 공식 `해외주식분봉조회`(`HHDFS76950200`)를 읽기 전용으로 호출해
+`config/universe.yaml`의 미국 종목과 시장 기준 종목(QQQ)의 최근 완료된 정규장
+20세션을 가져올 수 있습니다. 장전·장후 봉은 저장하지 않으며, 조기폐장을 포함한
+공식 세션별 예상 1분봉이 모두 존재하는지 검사합니다.
+
+```bash
+uv run daytrader-feed --sync-kis-us-history --history-sessions 20
+```
+
+한 종목만 다시 확인하려면 다음처럼 실행합니다.
+
+```bash
+uv run daytrader-feed --sync-kis-us-history --history-sessions 20 \
+  --history-symbol NVDA
+```
+
+명령 결과의 모든 종목이 `ready: true`여야 20세션 준비가 완료된 것입니다. 일부
+분봉이 없으면 종료코드 2와 함께 `날짜:관측봉수/예상봉수`가 출력되고, 상대 거래량은
+계속 준비되지 않은 상태로 유지됩니다. KIS 공식 저장소의 레거시 예제는 이 API로
+약 1개월 분봉을 반복 조회할 수 있다고 설명합니다.
+
+참고 자료:
+
+- [KIS 공식 해외주식 분봉조회 예제](https://github.com/koreainvestment/open-trading-api/tree/main/examples_llm/overseas_stock/inquire_time_itemchartprice)
+- [KIS 공식 약 1개월 분봉 수집 예제](https://github.com/koreainvestment/open-trading-api/blob/main/legacy/rest/get_ovsstk_chart_price.py)
+
+## 공급자 CSV로 과거 분봉 가져오기
 
 KIS 국내 당일분봉 API는 전일 분봉을 제공하지 않으므로 20거래일 상대 거래량을
 즉시 준비하려면 신뢰할 수 있는 공급자에서 받은 정규장 1분봉을 가져와야 합니다.
@@ -109,8 +155,9 @@ US,NVDA,2026-07-14T09:30:00-04:00,170,171,169.9,170.8,120000,20450000
 
 ## 미국 호가 안전 경계
 
-KIS 공식 샘플은 미국 실시간 1호가를 제공한다고 설명하지만, 이 값이 여러 거래소를
-종합한 NBBO라고 명시하지 않습니다. 따라서 기본 설정은 다음과 같습니다.
+KIS 공식 샘플은 미국 실시간 1호가를 무료 제공한다고 설명하지만, 이 값이 여러
+거래소를 종합한 NBBO라고 명시하지 않습니다. 공식 자료 확인 결과도 동일하므로
+현재 KIS 피드는 검증된 통합호가로 승격하지 않고 다음 값을 유지합니다.
 
 ```dotenv
 FEED_US_QUOTE_SCOPE=venue
@@ -130,7 +177,8 @@ FEED_US_QUOTE_SCOPE=consolidated
 - KIS 해외 실시간 레코드에는 완전한 LULD·거래중단·기업행동 상태가 없습니다.
 - 브리지는 국내 `TRHT_YN` 거래정지 표시는 반영하지만 별도 상태 공급자를 대체하지
   않습니다.
-- 프로그램 시작 전에 발생한 당일 체결은 자동 복원하지 않습니다.
+- 프로그램 시작 전에 발생한 미국 당일 정규장 분봉은 위 KIS 동기화 명령으로
+  복원할 수 있습니다.
 - 20거래일 분봉이 없으면 상대 거래량이 필요한 눌림목 계획은 진입하지 않습니다.
 - 이 피드는 가상매매 입력 전용이며 실제 주문 기능을 추가하지 않습니다.
 

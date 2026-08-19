@@ -13,6 +13,12 @@ class Market(StrEnum):
     US = "US"
 
 
+class ExperimentCohort(StrEnum):
+    GPT_ALL_EQUAL = "GPT_ALL_EQUAL"
+    USER_FIXED_SLEEVE = "USER_FIXED_SLEEVE"
+    USER_REALLOCATED = "USER_REALLOCATED"
+
+
 class PlanStatus(StrEnum):
     VALIDATED = "VALIDATED"
     ARMED = "ARMED"
@@ -21,6 +27,7 @@ class PlanStatus(StrEnum):
     EXPIRED = "EXPIRED"
     REJECTED = "REJECTED"
     CANCELLED = "CANCELLED"
+    RISK_BLOCKED = "RISK_BLOCKED"
 
 
 class OrderState(StrEnum):
@@ -41,6 +48,14 @@ class OrderState(StrEnum):
 
 PRICE_INDICATORS = {"last", "bid", "ask", "spread_pct"}
 ALLOWED_INDICATORS = PRICE_INDICATORS | {
+    "regular_open_price",
+    "premarket_open",
+    "premarket_high",
+    "premarket_low",
+    "premarket_last",
+    "premarket_vwap",
+    "premarket_volume",
+    "premarket_gap_pct",
     "previous_open",
     "previous_high",
     "previous_low",
@@ -180,6 +195,17 @@ class PullbackRebreakSpec(BaseModel):
         return self
 
 
+class PremarketGuardSpec(BaseModel):
+    """Approval-time guardrails rechecked with regular-session data."""
+
+    reference_price: float = Field(gt=0)
+    max_open_deviation_pct: float = Field(default=1.0, gt=0, le=10)
+    max_spread_pct: float = Field(default=0.15, gt=0, le=2)
+    relative_volume_min: float = Field(default=1.3, gt=0, le=10)
+    require_above_vwap: bool = True
+    require_market_above_vwap: bool = True
+
+
 class CandidatePlan(BaseModel):
     symbol: str = Field(min_length=1, max_length=16)
     exchange: str = Field(min_length=2, max_length=16)
@@ -190,6 +216,7 @@ class CandidatePlan(BaseModel):
     take_profit: list[TakeProfitSpec] = Field(min_length=1, max_length=3)
     exit_policy: ExitPolicy = Field(default_factory=ExitPolicy)
     pullback_rebreak: PullbackRebreakSpec | None = None
+    premarket_guard: PremarketGuardSpec | None = None
     force_exit_time: time
 
     @model_validator(mode="after")
@@ -321,3 +348,36 @@ class PortfolioView(BaseModel):
     equity: float
     realized_pnl: float
     positions: list[dict[str, Any]]
+
+
+class PortfolioExperimentRequest(BaseModel):
+    experiment_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,48}$")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    market: Market
+    trade_date: date
+    expires_at: datetime
+    approval_nonce: str = Field(pattern=r"^\d{6}$")
+    candidates: list[CandidatePlan] = Field(min_length=1, max_length=3)
+    user_selected_symbols: list[str] = Field(min_length=1, max_length=3)
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "PortfolioExperimentRequest":
+        if self.created_at.tzinfo is None or self.expires_at.tzinfo is None:
+            raise ValueError("experiment timestamps must include a timezone")
+        symbols = [candidate.symbol.upper() for candidate in self.candidates]
+        if len(set(symbols)) != len(symbols):
+            raise ValueError("experiment candidates cannot contain duplicate symbols")
+        selected = [symbol.upper() for symbol in self.user_selected_symbols]
+        if len(set(selected)) != len(selected):
+            raise ValueError("user selection cannot contain duplicate symbols")
+        if not set(selected).issubset(symbols):
+            raise ValueError("user selection must be a subset of GPT candidates")
+        self.user_selected_symbols = selected
+        return self
+
+
+class PortfolioExperimentReceipt(BaseModel):
+    experiment_id: str
+    status: Literal["ACTIVE"]
+    cohorts: list[ExperimentCohort]
+    message: str

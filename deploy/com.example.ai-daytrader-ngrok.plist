@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.example.ai-daytrader-ngrok</string>
+  <key>ProgramArguments</key><array>
+    <string>/ABSOLUTE/PATH/TO/ngrok</string>
+    <string>http</string>
+    <string>8787</string>
+    <string>--config</string>
+    <string>/Users/YOU/Library/Application Support/ngrok/ngrok.yml</string>
+    <string>--traffic-policy-file</string>
+    <string>/ABSOLUTE/PATH/ai-daytrader-sim/deploy/ngrok-traffic-policy.yml</string>
+    <string>--log</string>
+    <string>stdout</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict>
+    <key>NetworkState</key><true/>
+    <key>SuccessfulExit</key><false/>
+  </dict>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/tmp/ai-daytrader-ngrok.out.log</string>
+  <key>StandardErrorPath</key><string>/tmp/ai-daytrader-ngrok.err.log</string>
+</dict></plist>

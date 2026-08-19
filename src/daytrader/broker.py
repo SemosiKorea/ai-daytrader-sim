@@ -92,6 +92,11 @@ class Position:
     filled_targets: set[int] = field(default_factory=set)
     exit_pending_at: datetime | None = None
     exit_reason: str | None = None
+    exit_order_id: str | None = None
+    exit_eligible_fill_at: datetime | None = None
+    exit_remaining_quantity: int = 0
+    exit_limit_price: float | None = None
+    exit_target_index: int | None = None
     below_vwap_since: datetime | None = None
 
 
@@ -119,13 +124,26 @@ class PaperBroker:
         repository: Repository,
         costs: dict[str, CostConfig],
         order_intent_recorder: OrderIntentRecorder | None = None,
+        *,
+        max_concurrent_positions: int = 1,
+        fixed_quantities: dict[tuple[Market, str], int] | None = None,
+        enforce_portfolio_gates: bool = True,
     ):
         self.repository = repository
         self.costs = costs
         self.order_intent_recorder = order_intent_recorder
+        self.max_concurrent_positions = max(1, max_concurrent_positions)
+        self.fixed_quantities = {
+            (market, symbol.upper()): quantity
+            for (market, symbol), quantity in (fixed_quantities or {}).items()
+        }
+        self.enforce_portfolio_gates = enforce_portfolio_gates
         self.portfolios = {
             Market(market): Portfolio(Market(market), cost.initial_cash, cost.initial_cash)
             for market, cost in costs.items()
+        }
+        self.marks: dict[Market, dict[str, float]] = {
+            market: {} for market in self.portfolios
         }
         for market in self.portfolios:
             self._restore(market)
@@ -199,6 +217,15 @@ class PaperBroker:
                 position.exit_pending_at.isoformat() if position.exit_pending_at else None
             ),
             "exit_reason": position.exit_reason,
+            "exit_order_id": position.exit_order_id,
+            "exit_eligible_fill_at": (
+                position.exit_eligible_fill_at.isoformat()
+                if position.exit_eligible_fill_at
+                else None
+            ),
+            "exit_remaining_quantity": position.exit_remaining_quantity,
+            "exit_limit_price": position.exit_limit_price,
+            "exit_target_index": position.exit_target_index,
             "below_vwap_since": (
                 position.below_vwap_since.isoformat() if position.below_vwap_since else None
             ),
@@ -245,6 +272,7 @@ class PaperBroker:
         if not state:
             return
         portfolio = self.portfolios[market]
+        portfolio.initial_cash = float(state.get("initial_cash", portfolio.initial_cash))
         portfolio.cash = float(state["cash"])
         portfolio.realized_pnl = float(state.get("realized_pnl", 0.0))
         portfolio.session_realized_pnl = float(state.get("session_realized_pnl", 0.0))
@@ -285,6 +313,19 @@ class PaperBroker:
                     else None
                 ),
                 exit_reason=raw.get("exit_reason"),
+                exit_order_id=raw.get("exit_order_id"),
+                exit_eligible_fill_at=(
+                    datetime.fromisoformat(raw["exit_eligible_fill_at"])
+                    if raw.get("exit_eligible_fill_at")
+                    else None
+                ),
+                exit_remaining_quantity=int(raw.get("exit_remaining_quantity", 0)),
+                exit_limit_price=(
+                    float(raw["exit_limit_price"])
+                    if raw.get("exit_limit_price") is not None
+                    else None
+                ),
+                exit_target_index=raw.get("exit_target_index"),
                 below_vwap_since=(
                     datetime.fromisoformat(raw["below_vwap_since"])
                     if raw.get("below_vwap_since")
@@ -316,6 +357,17 @@ class PaperBroker:
                 exit_policy=raw["exit_policy"],
             )
             portfolio.pending_orders[order.symbol] = order
+
+    def _record_equity(self, market: Market, timestamp: datetime) -> None:
+        portfolio = self.portfolios[market]
+        market_value = sum(
+            position.remaining
+            * self.marks[market].get(symbol, position.entry_price)
+            for symbol, position in portfolio.positions.items()
+        )
+        self.repository.record_equity_snapshot(
+            market, timestamp, portfolio.cash + market_value
+        )
 
     def _ensure_session(self, market: Market, timestamp: datetime) -> None:
         timezone = ZoneInfo("Asia/Seoul" if market == Market.KR else "America/New_York")
@@ -362,18 +414,19 @@ class PaperBroker:
         self._ensure_session(market, timestamp)
         portfolio = self.portfolios[market]
         cost = self.costs[market.value]
-        if portfolio.positions or portfolio.pending_orders:
+        occupied = set(portfolio.positions) | set(portfolio.pending_orders)
+        if len(occupied) >= self.max_concurrent_positions:
             return False, "POSITION_SLOT_OCCUPIED"
         if portfolio.trades_today >= cost.max_filled_entries_per_day:
             return False, "DAILY_ENTRY_LIMIT"
         if portfolio.order_submissions_today >= cost.max_order_submissions_per_day:
             return False, "DAILY_ORDER_LIMIT"
-        if portfolio.consecutive_stops >= cost.consecutive_stop_limit:
+        if self.enforce_portfolio_gates and portfolio.consecutive_stops >= cost.consecutive_stop_limit:
             return False, "CONSECUTIVE_STOP_LIMIT"
-        if portfolio.cooldown_until and timestamp < portfolio.cooldown_until:
+        if self.enforce_portfolio_gates and portfolio.cooldown_until and timestamp < portfolio.cooldown_until:
             return False, "STOP_COOLDOWN"
         limit = portfolio.initial_cash * cost.daily_loss_limit_pct / 100
-        if self.daily_risk_used(market) >= limit:
+        if self.enforce_portfolio_gates and self.daily_risk_used(market) >= limit:
             return False, "DAILY_RISK_LIMIT"
         return True, None
 
@@ -400,7 +453,12 @@ class PaperBroker:
         cash_quantity = math.floor(
             portfolio.cash / self._entry_unit_cost_at_limit(market, candidate.entry.limit_price)
         )
-        quantity = min(risk_quantity, cash_quantity, policy.max_position_quantity)
+        fixed_quantity = self.fixed_quantities.get((market, candidate.symbol.upper()))
+        quantity = min(
+            fixed_quantity if fixed_quantity is not None else risk_quantity,
+            cash_quantity,
+            policy.max_position_quantity,
+        )
         if quantity <= 0:
             return None, "RISK_BLOCKED"
         if not self.repository.claim_idempotency_key(key, market, candidate.symbol, plan_id):
@@ -560,6 +618,7 @@ class PaperBroker:
         self._save(order.market)
 
     def process_pending(self, tick: MarketTick) -> None:
+        self.marks[tick.market][tick.symbol] = tick.last
         portfolio = self.portfolios[tick.market]
         order = portfolio.pending_orders.get(tick.symbol)
         if not order:
@@ -596,6 +655,7 @@ class PaperBroker:
         if not policy.allow_partial_fill and visible < order.remaining:
             return
         self._apply_entry_fill(order, tick, min(order.remaining, visible), execution, fee)
+        self._record_equity(tick.market, timestamp)
 
     def cancel_pending(
         self, market: Market, symbol: str, reason: str, state: OrderState = OrderState.CANCELLED
@@ -629,31 +689,19 @@ class PaperBroker:
                 if now >= order.expires_at:
                     self.cancel_pending(market, symbol, "FILL_TIMEOUT", OrderState.EXPIRED)
 
-    def close_quantity(
+    def _apply_exit_fill(
         self,
         position: Position,
         quantity: int,
         tick: MarketTick,
         reason: str,
         state: OrderState = OrderState.CLOSED,
+        order_id: str | None = None,
     ) -> None:
         quantity = min(quantity, position.remaining)
         if quantity <= 0:
             return
-        exit_order_id = str(uuid.uuid4())
-        if self.order_intent_recorder:
-            self.order_intent_recorder.record_new_order(
-                order_id=exit_order_id,
-                idempotency_key=(f"{position.plan_id}:{position.symbol}:EXIT:{exit_order_id}"),
-                plan_id=position.plan_id,
-                market=position.market,
-                symbol=position.symbol,
-                exchange=position.exchange,
-                side="SELL",
-                quantity=quantity,
-                limit_price=tick.bid,
-                reason=reason,
-            )
+        exit_order_id = order_id or str(uuid.uuid4())
         gross = tick.bid * quantity
         net, fees = self._exit_net(position.market, gross)
         pnl = net - position.entry_price * quantity
@@ -677,8 +725,48 @@ class PaperBroker:
                 "price": tick.bid,
                 "fees": fees,
                 "pnl": pnl,
+                "remaining_exit_quantity": max(
+                    0, position.exit_remaining_quantity - quantity
+                ),
             },
         )
+        position.exit_remaining_quantity = max(
+            0, position.exit_remaining_quantity - quantity
+        )
+        exit_completed = position.exit_remaining_quantity == 0
+        self.repository.add_event(
+            "ORDER_STATE_CHANGED",
+            position.market,
+            position.symbol,
+            position.plan_id,
+            {
+                "order_id": exit_order_id,
+                "state": (
+                    state.value
+                    if exit_completed
+                    else OrderState.PARTIALLY_FILLED.value
+                ),
+                "reason": reason,
+                "filled_quantity": quantity,
+                "remaining_quantity": position.exit_remaining_quantity,
+            },
+        )
+        completed_target = position.exit_target_index
+        if exit_completed and completed_target is not None:
+            position.filled_targets.add(completed_target)
+            if (
+                completed_target == 0
+                and position.remaining > 0
+                and position.exit_policy.get("move_stop_to_entry_after_tp1", False)
+            ):
+                position.stop_price = max(position.stop_price, position.entry_price)
+        if exit_completed:
+            position.exit_pending_at = None
+            position.exit_reason = None
+            position.exit_order_id = None
+            position.exit_eligible_fill_at = None
+            position.exit_limit_price = None
+            position.exit_target_index = None
         if position.remaining == 0:
             if reason == "STOP_LOSS":
                 portfolio.consecutive_stops += 1
@@ -693,7 +781,17 @@ class PaperBroker:
                 position.market,
                 position.symbol,
                 position.plan_id,
-                {"pnl": position.realized_pnl, "fees": position.fees, "reason": reason},
+                {
+                    "pnl": position.realized_pnl,
+                    "fees": position.fees,
+                    "reason": reason,
+                    "entry_notional": position.entry_price * position.quantity,
+                    "return_pct": (
+                        position.realized_pnl
+                        / (position.entry_price * position.quantity)
+                        * 100
+                    ),
+                },
             )
             self.repository.add_event(
                 "ORDER_STATE_CHANGED",
@@ -704,17 +802,93 @@ class PaperBroker:
             )
             portfolio.positions.pop(position.symbol, None)
         self._save(position.market)
+        self._record_equity(
+            position.market, tick.received_timestamp or tick.timestamp
+        )
 
-    def _begin_exit(self, position: Position, tick: MarketTick, reason: str) -> None:
+    def close_quantity(
+        self,
+        position: Position,
+        quantity: int,
+        tick: MarketTick,
+        reason: str,
+        state: OrderState = OrderState.CLOSED,
+    ) -> None:
+        """Immediate administrative close used only for recovery/corporate actions."""
+        quantity = min(quantity, position.remaining)
+        if quantity <= 0:
+            return
+        exit_order_id = str(uuid.uuid4())
+        if self.order_intent_recorder:
+            self.order_intent_recorder.record_new_order(
+                order_id=exit_order_id,
+                idempotency_key=(f"{position.plan_id}:{position.symbol}:EXIT:{exit_order_id}"),
+                plan_id=position.plan_id,
+                market=position.market,
+                symbol=position.symbol,
+                exchange=position.exchange,
+                side="SELL",
+                quantity=quantity,
+                limit_price=tick.bid,
+                reason=reason,
+            )
+        position.exit_remaining_quantity = quantity
+        position.exit_target_index = None
+        self._apply_exit_fill(position, quantity, tick, reason, state, exit_order_id)
+
+    def _begin_exit(
+        self,
+        position: Position,
+        tick: MarketTick,
+        reason: str,
+        quantity: int | None = None,
+        target_index: int | None = None,
+    ) -> None:
         if position.exit_pending_at is None:
-            position.exit_pending_at = tick.received_timestamp or tick.timestamp
+            timestamp = tick.received_timestamp or tick.timestamp
+            requested = min(quantity or position.remaining, position.remaining)
+            if requested <= 0:
+                return
+            position.exit_pending_at = timestamp
             position.exit_reason = reason
+            position.exit_order_id = str(uuid.uuid4())
+            position.exit_eligible_fill_at = timestamp + timedelta(
+                milliseconds=self.costs[position.market.value].fill_latency_ms
+            )
+            position.exit_remaining_quantity = requested
+            position.exit_limit_price = (
+                position.stop_price * (1 - position.stop_limit_offset_pct / 100)
+                if reason == "STOP_LOSS"
+                else None
+            )
+            position.exit_target_index = target_index
+            if self.order_intent_recorder:
+                self.order_intent_recorder.record_new_order(
+                    order_id=position.exit_order_id,
+                    idempotency_key=(
+                        f"{position.plan_id}:{position.symbol}:EXIT:{position.exit_order_id}"
+                    ),
+                    plan_id=position.plan_id,
+                    market=position.market,
+                    symbol=position.symbol,
+                    exchange=position.exchange,
+                    side="SELL",
+                    quantity=requested,
+                    limit_price=tick.bid,
+                    reason=reason,
+                )
             self.repository.add_event(
                 "ORDER_STATE_CHANGED",
                 position.market,
                 position.symbol,
                 position.plan_id,
-                {"state": OrderState.EXIT_PENDING.value, "reason": reason},
+                {
+                    "order_id": position.exit_order_id,
+                    "state": OrderState.EXIT_PENDING.value,
+                    "reason": reason,
+                    "quantity": requested,
+                    "eligible_fill_at": position.exit_eligible_fill_at,
+                },
             )
             self.cancel_pending(position.market, position.symbol, "EXIT_TRIGGERED")
 
@@ -722,19 +896,36 @@ class PaperBroker:
         if not position.exit_pending_at:
             return False
         timestamp = tick.received_timestamp or tick.timestamp
-        stop_limit = position.stop_price * (1 - position.stop_limit_offset_pct / 100)
+        if position.exit_eligible_fill_at and timestamp < position.exit_eligible_fill_at:
+            return False
         emergency = (timestamp - position.exit_pending_at).total_seconds()
-        if tick.bid >= stop_limit or emergency >= position.emergency_exit_after_sec:
-            self.close_quantity(
-                position,
-                position.remaining,
-                tick,
-                position.exit_reason or "STOP_LOSS",
-            )
-            return True
-        return False
+        if (
+            position.exit_limit_price is not None
+            and tick.bid < position.exit_limit_price
+            and emergency < position.emergency_exit_after_sec
+        ):
+            return False
+        policy = self.costs[position.market.value]
+        visible = tick.bid_size
+        if visible <= 0:
+            visible = math.floor(tick.trade_size * policy.volume_participation_pct / 100)
+        visible = min(visible, policy.max_fill_quantity_per_tick)
+        if visible <= 0:
+            return False
+        quantity = min(position.exit_remaining_quantity, position.remaining, visible)
+        if quantity <= 0:
+            return False
+        self._apply_exit_fill(
+            position,
+            quantity,
+            tick,
+            position.exit_reason or "EXIT",
+            OrderState.CLOSED,
+            position.exit_order_id,
+        )
+        return True
 
-    def on_tick(self, tick: MarketTick) -> None:
+    def _on_tick(self, tick: MarketTick) -> None:
         self.process_pending(tick)
         position = self.portfolios[tick.market].positions.get(tick.symbol)
         if not position or tick.market_status != "open" or tick.symbol_status != "trading":
@@ -750,7 +941,8 @@ class PaperBroker:
 
         max_minutes = int(position.exit_policy.get("max_holding_minutes", 90))
         if timestamp - position.opened_at >= timedelta(minutes=max_minutes):
-            self.close_quantity(position, position.remaining, tick, "MAX_HOLDING_TIME")
+            self._begin_exit(position, tick, "MAX_HOLDING_TIME")
+            self._process_exit_pending(position, tick)
             return
         progress_minutes = position.exit_policy.get("no_progress_exit_minutes")
         min_progress = float(position.exit_policy.get("no_progress_min_pct", 0.3))
@@ -759,7 +951,8 @@ class PaperBroker:
         ):
             progress = (position.highest_price - position.entry_price) / position.entry_price * 100
             if progress < min_progress:
-                self.close_quantity(position, position.remaining, tick, "NO_PROGRESS")
+                self._begin_exit(position, tick, "NO_PROGRESS")
+                self._process_exit_pending(position, tick)
                 return
         below_vwap_seconds = position.exit_policy.get("exit_if_below_vwap_sec")
         vwap = tick.indicators.get("vwap_regular")
@@ -769,7 +962,8 @@ class PaperBroker:
                 if (timestamp - position.below_vwap_since).total_seconds() >= int(
                     below_vwap_seconds
                 ):
-                    self.close_quantity(position, position.remaining, tick, "VWAP_FAILURE")
+                    self._begin_exit(position, tick, "VWAP_FAILURE")
+                    self._process_exit_pending(position, tick)
                     return
             else:
                 position.below_vwap_since = None
@@ -779,17 +973,27 @@ class PaperBroker:
                 continue
             if tick.bid >= target_price:
                 self.cancel_pending(position.market, position.symbol, "TARGET_REACHED")
-                position.filled_targets.add(index)
-                self.close_quantity(position, quantity, tick, f"TAKE_PROFIT_{index + 1}")
-                if (
-                    index == 0
-                    and position.remaining > 0
-                    and position.exit_policy.get("move_stop_to_entry_after_tp1", False)
-                ):
-                    position.stop_price = max(position.stop_price, position.entry_price)
+                self._begin_exit(
+                    position,
+                    tick,
+                    f"TAKE_PROFIT_{index + 1}",
+                    quantity,
+                    index,
+                )
+                self._process_exit_pending(position, tick)
                 if position.remaining == 0:
                     return
         self._save(tick.market)
+
+    def on_tick(self, tick: MarketTick) -> None:
+        self.marks[tick.market][tick.symbol] = tick.last
+        try:
+            self._on_tick(tick)
+        finally:
+            if tick.symbol in self.portfolios[tick.market].positions:
+                self._record_equity(
+                    tick.market, tick.received_timestamp or tick.timestamp
+                )
 
     def force_close(self, market: Market, ticks: dict[str, MarketTick], reason: str) -> None:
         portfolio = self.portfolios[market]
@@ -797,8 +1001,24 @@ class PaperBroker:
             self.cancel_pending(market, symbol, reason, OrderState.FORCE_CLOSED)
         for symbol, position in list(portfolio.positions.items()):
             if symbol in ticks:
+                self._begin_exit(position, ticks[symbol], reason)
+                self._process_exit_pending(position, ticks[symbol])
+
+    def recovery_force_close(
+        self, market: Market, ticks: dict[str, MarketTick], reason: str
+    ) -> None:
+        portfolio = self.portfolios[market]
+        for symbol in list(portfolio.pending_orders):
+            self.cancel_pending(market, symbol, reason, OrderState.FORCE_CLOSED)
+        for symbol, position in list(portfolio.positions.items()):
+            tick = ticks.get(symbol)
+            if tick:
                 self.close_quantity(
-                    position, position.remaining, ticks[symbol], reason, OrderState.FORCE_CLOSED
+                    position,
+                    position.remaining,
+                    tick,
+                    reason,
+                    OrderState.FORCE_CLOSED,
                 )
 
     def reset_day(self, market: Market) -> None:
@@ -814,11 +1034,22 @@ class PaperBroker:
         pnls = self.repository.closed_trade_pnls(market)
         gross_profit = sum(value for value in pnls if value > 0)
         gross_loss = abs(sum(value for value in pnls if value < 0))
-        equity = self.portfolios[market].initial_cash
-        peak = equity
+        portfolio = self.portfolios[market]
+        current_equity = portfolio.cash + sum(
+            position.remaining
+            * self.marks[market].get(symbol, position.entry_price)
+            for symbol, position in portfolio.positions.items()
+        )
+        equity_values = self.repository.equity_values(market)
+        if not equity_values:
+            equity = portfolio.initial_cash
+            equity_values = []
+            for pnl in pnls:
+                equity += pnl
+                equity_values.append(equity)
+        peak = portfolio.initial_cash
         max_drawdown = 0.0
-        for pnl in pnls:
-            equity += pnl
+        for equity in equity_values:
             peak = max(peak, equity)
             if peak > 0:
                 max_drawdown = max(max_drawdown, (peak - equity) / peak * 100)
@@ -826,7 +1057,8 @@ class PaperBroker:
             "market": market.value,
             "paper_sessions": self.repository.paper_session_count(market),
             "closed_trades": len(pnls),
-            "net_pnl": sum(pnls),
+            "net_pnl": current_equity - portfolio.initial_cash,
+            "realized_net_pnl": sum(pnls),
             "profit_factor": gross_profit / gross_loss if gross_loss else None,
             "max_drawdown_pct": max_drawdown,
             "target_profit_factor": 1.2,

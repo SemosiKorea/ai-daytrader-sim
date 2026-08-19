@@ -8,18 +8,23 @@ Safety enhancement matrix (Korean):
 State-based pullback strategy (Korean):
 [`docs/PULLBACK_STRATEGY.ko.md`](docs/PULLBACK_STRATEGY.ko.md)
 
+Portfolio comparison experiment (Korean):
+[`docs/PORTFOLIO_EXPERIMENT.ko.md`](docs/PORTFOLIO_EXPERIMENT.ko.md)
+
 KIS record-only order gateway (Korean):
 [`docs/KIS_ORDER_GATEWAY.ko.md`](docs/KIS_ORDER_GATEWAY.ko.md)
 
 An independent, paper-only program for this workflow:
 
-1. A Custom GPT proposes one KR or US AI/semiconductor intraday plan.
-2. The user reviews it and explicitly approves it with a one-time Telegram code.
-3. The GPT Action sends the unchanged structured plan to this service.
-4. Deterministic validation arms the plan for that market date only.
-5. Read-only KIS quotes or an authenticated enriched feed drive simulated fills.
-6. Stops, targets, risk limits, and forced close are executed by code, not by an LLM.
-7. Order decisions are converted to KIS request contracts and stored locally only.
+1. The feed subscribes to the active market's multi-theme universe before approval.
+2. A Custom GPT reads a premarket shortlist through a read-only Action and proposes a plan.
+3. KR is confirmed after 09:10 KST and US after 09:40 ET using regular volume, spread, and VWAP.
+4. The user reviews it and explicitly approves it with a one-time Telegram code.
+5. The GPT Action sends the unchanged structured plan to this service.
+6. Deterministic validation arms the plan for that market date only.
+7. Read-only KIS quotes or an authenticated enriched feed drive simulated fills.
+8. Stops, targets, risk limits, and forced close are executed by code, not by an LLM.
+9. Order decisions are converted to KIS request contracts and stored locally only.
 
 No OpenAI API key is used by this project. The Custom GPT runs in ChatGPT and calls
 the HTTPS Action after approval. ChatGPT/GPT availability is governed by the user's
@@ -49,7 +54,7 @@ ChatGPT plan. This software does not provide investment advice or guarantee resu
 ## Install
 
 Requirements: macOS, `uv`, Python 3.11+, KIS Open API quotation credentials, and
-optionally a Telegram bot and Cloudflare Tunnel.
+optionally a Telegram bot and ngrok.
 
 ```bash
 git clone https://github.com/SemosiKorea/ai-daytrader-sim.git
@@ -97,7 +102,9 @@ Setup and operational limitations of the included KIS WebSocket bridge are in
 
 The included `daytrader-feed` process discovers symbols in armed plans, subscribes
 to read-only KIS WebSocket trade/quote feeds, calculates the indicator contract,
-and posts authenticated ticks to the simulator:
+and posts authenticated ticks to the simulator. WebSocket reception is decoupled
+from indicator and HTTP work, and only the latest per-symbol quote/trade pair is
+coalesced every 100-250ms to prevent high-volume symbols from creating a backlog:
 
 ```bash
 # Run the API first, then the feed in a second terminal.
@@ -149,6 +156,13 @@ The user asks the Custom GPT for the daily plan, reviews exact JSON-equivalent t
 then says they approve and types the relevant OTP. The GPT Action registers the plan.
 Discussion or a generic “looks good” must not trigger the Action.
 
+The Custom GPT first calls `GET /v1/gpt-actions/candidates`. The KR premarket window
+starts at 08:40 KST and the US window starts 45 minutes before the regular open;
+regular confirmation begins at 09:10 KST and 09:40 ET respectively. A regular open
+outside the approved guard permanently marks that candidate RISK_BLOCKED for the
+day. No entry order is created before regular relative-volume, spread, and VWAP
+confirmation or while ask exceeds the maximum entry limit.
+
 For manual testing, issue an OTP with the admin endpoint:
 
 ```bash
@@ -161,19 +175,29 @@ curl -X POST http://127.0.0.1:8787/v1/admin/nonces \
 Then replace the sample's date, expiry, and OTP and post it using
 `GPT_ACTION_BEARER`. `samples/kr_plan.json` is schema-only and is not a recommendation.
 
-## Custom GPT and Cloudflare
+## Custom GPT and ngrok
 
 1. Create a Custom GPT (a GPT in ChatGPT) and paste
    `docs/CUSTOM_GPT_INSTRUCTIONS.md` into its instructions.
-2. Create a Cloudflare Tunnel to localhost. The example ingress exposes only
-   `/v1/gpt-actions/*`; admin, dashboard, portfolio, and market-data paths remain local.
-3. Replace `https://trade.example.com` in `gpt_action_openapi.yaml`, import it as an
+2. Install ngrok, register its account authtoken locally, and start it with
+   `deploy/ngrok-traffic-policy.yml`. The policy exposes only `/v1/gpt-actions/*`;
+   admin, dashboard, portfolio, and market-data paths remain local.
+3. Replace the ngrok placeholder in `gpt_action_openapi.yaml`, import it as an
    Action, and configure bearer/API-key authentication with `GPT_ACTION_BEARER`.
 4. Test with a new OTP and confirm a `201` receipt and matching content hash.
 
-The two launchd templates in `deploy/` keep the API and feed running. Replace all
-absolute path placeholders before installing them in `~/Library/LaunchAgents`.
-Run cloudflared as a separate launch agent using the restricted ingress configuration.
+On mobile, open the GPT directly from the GPT sidebar and start a new conversation.
+Turn off Pro mode because it does not load Actions. After changing instructions or
+an Action in the GPT editor, publish the update and test from a new mobile
+conversation. A successful invocation appears in ngrok inspection as a
+`/v1/gpt-actions/candidates` request with the `ChatGPT-User/1.0` user agent.
+
+The launchd templates in `deploy/` keep the API, feed, and ngrok running. Replace all
+absolute path placeholders before installing manually, or run
+`scripts/install_runtime_launch_agents.sh` to populate and install the API and feed
+agents automatically. After the ngrok authtoken has been registered,
+`scripts/install_ngrok_launch_agent.sh` installs its populated launch agent. See
+[`docs/NGROK_SETUP.ko.md`](docs/NGROK_SETUP.ko.md) for the complete setup and checks.
 
 ## Rules and simulated fills
 
@@ -200,7 +224,11 @@ and `ne`; pullback state and derived metrics are persisted in SQLite.
 - Every state transition, fill, cancellation, data rejection, and entry rejection
   is written to the audit log with reason codes.
 
-The allowlist is in `config/universe.yaml`. Validation also rejects empty ordinary
+The allowlist is in `config/universe.yaml`. Each market contains 18 symbols and uses
+19 symbols or 38 WebSocket subscriptions after its reference instrument is included.
+The expanded scope adds battery, biotech, defense, power infrastructure, EV/robotics,
+data analytics, cybersecurity, and power themes to the original AI/semiconductor set.
+Candidate records include a `theme` field. Validation also rejects empty ordinary
 rule groups unless explicitly price-only, contradictory conditions, duplicate targets,
 ambiguous indicator names, incomplete
 opening ranges, non-session dates, invalid plan versions/timestamps, and corporate
@@ -208,9 +236,17 @@ action invalidations.
 
 ## Evaluation
 
-Use `GET /v1/performance/KR` and `/US` with `ADMIN_BEARER`. Metrics are computed from
-closed paper positions persisted in the audit log: trade count, net P&L, profit
-factor, and maximum drawdown. The intended gate is at least 30 market sessions and
+To isolate GPT-wide performance, user filtering, and concentration effects, submit
+one OTP-approved request to `POST /v1/gpt-actions/experiments`. It creates isolated
+`GPT_ALL_EQUAL`, `USER_FIXED_SLEEVE`, and `USER_REALLOCATED` paper ledgers driven by
+the same ticks and fill model. Read the comparison from
+`GET /v1/gpt-actions/experiments/{experiment_id}`. Experiment ledgers never instantiate
+the KIS order-intent recorder. Approval-time costs, initial cash, target weights, and
+whole-share allocations are stored as an immutable experiment snapshot.
+
+Use `GET /v1/performance/KR` and `/US` with `ADMIN_BEARER`. Trade count and profit
+factor use closed-position audit events; net P&L and maximum drawdown use the
+mark-to-market equity series, including open positions. The intended gate is at least 30 market sessions and
 50 closed trades combined, positive net P&L, profit factor >=1.2, and MDD <=5%.
 Passing a paper test is not evidence that live execution will perform similarly.
 

@@ -4,6 +4,7 @@ import hmac
 import html
 import sqlite3
 from contextlib import asynccontextmanager
+from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -11,20 +12,25 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from .broker import PaperBroker
 from .config import Settings, load_costs, load_universe
 from .engine import TradingEngine
+from .experiment import PortfolioExperimentManager
 from .kis_orders import KISOrderIntentRecorder
 from .kis_readonly import KISQuotePoller, KISReadOnlyClient
 from .models import (
+    ExperimentCohort,
     Market,
     MarketTick,
     NonceRequest,
     NonceResponse,
     PlanReceipt,
     PlanStatus,
+    PortfolioExperimentReceipt,
+    PortfolioExperimentRequest,
     TradePlan,
 )
 from .notifications import TelegramNotifier
 from .repository import PlanConflictError, Repository
 from .scheduler import SessionScheduler
+from .scanner import CandidateScanner
 from .validator import PlanValidationError, validate_plan
 
 
@@ -51,9 +57,16 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     )
     broker = PaperBroker(repository, costs, order_intent_recorder)
     engine = TradingEngine(repository, broker)
+    engine.recover_expired_state()
     notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
-    session_scheduler = SessionScheduler(repository, engine, broker, notifier)
     quote_poller = None
+    candidate_scanner = CandidateScanner(repository, universe, settings)
+    experiment_manager = PortfolioExperimentManager(
+        repository, costs, settings.experiment_data_path
+    )
+    session_scheduler = SessionScheduler(
+        repository, engine, broker, notifier, experiment_manager
+    )
     if settings.kis_poll_enabled:
         if not settings.kis_app_key or not settings.kis_app_secret:
             raise ValueError("KIS polling requires KIS_APP_KEY and KIS_APP_SECRET")
@@ -63,6 +76,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
             engine,
             universe,
             settings.kis_poll_seconds,
+            experiment_manager,
         )
 
     @asynccontextmanager
@@ -78,7 +92,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
 
     app = FastAPI(
         title="AI Day Trader Simulator",
-        version="0.5.0",
+        version="0.7.0",
         description="GPT-approved paper trading with record-only KIS order intents.",
         lifespan=lifespan,
     )
@@ -92,6 +106,8 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     app.state.notifier = notifier
     app.state.scheduler = session_scheduler
     app.state.quote_poller = quote_poller
+    app.state.candidate_scanner = candidate_scanner
+    app.state.experiment_manager = experiment_manager
 
     @app.middleware("http")
     async def reject_large_payload(request: Request, call_next):
@@ -117,7 +133,9 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     ) -> NonceResponse:
         _require(settings.admin_bearer, authorization)
         nonce, expires_at = repository.issue_nonce(payload.market, payload.trade_date)
-        await notifier.send(f"[{payload.market.value}] 승인코드 {nonce} / {payload.trade_date}")
+        await notifier.send_best_effort(
+            f"[{payload.market.value}] 승인코드 {nonce} / {payload.trade_date}"
+        )
         return NonceResponse(
             market=payload.market,
             trade_date=payload.trade_date,
@@ -159,7 +177,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
                 {"reason": "INVALID_EXPIRED_OR_REUSED_APPROVAL_CODE"},
             )
             raise HTTPException(status_code=409, detail="invalid, expired, or reused approval code")
-        await notifier.send(
+        await notifier.send_best_effort(
             f"[{plan.market.value}] 계획 승인 완료: {plan.plan_id}\n"
             f"종목: {', '.join(c.symbol for c in plan.approved_symbols)}"
         )
@@ -169,6 +187,87 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
             content_hash=content_hash,
             message="approved plan is armed for paper trading",
         )
+
+    @app.get("/v1/gpt-actions/candidates")
+    async def candidate_shortlist(
+        market: Market,
+        phase: Literal["auto", "premarket", "regular"] = "auto",
+        limit: int = Query(default=5, ge=1, le=10),
+        authorization: str | None = Header(default=None),
+    ) -> dict:
+        _require(settings.gpt_action_bearer, authorization)
+        return candidate_scanner.scan(market, phase, limit)
+
+    @app.post(
+        "/v1/gpt-actions/experiments",
+        response_model=PortfolioExperimentReceipt,
+        status_code=201,
+    )
+    async def register_portfolio_experiment(
+        request: PortfolioExperimentRequest,
+        authorization: str | None = Header(default=None),
+    ) -> PortfolioExperimentReceipt:
+        _require(settings.gpt_action_bearer, authorization)
+        validation_plan = TradePlan(
+            plan_id=f"{request.experiment_id}_validation",
+            created_at=request.created_at,
+            market=request.market,
+            trade_date=request.trade_date,
+            expires_at=request.expires_at,
+            approval_nonce=request.approval_nonce,
+            approved_symbols=request.candidates,
+        )
+        try:
+            validate_plan(validation_plan, universe, costs)
+        except PlanValidationError as exc:
+            repository.add_event(
+                "PORTFOLIO_EXPERIMENT_REJECTED",
+                request.market,
+                None,
+                None,
+                {"experiment_id": request.experiment_id, "reason": str(exc)},
+            )
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if repository.get_portfolio_experiment(request.experiment_id):
+            raise HTTPException(status_code=409, detail="duplicate experiment")
+        if not repository.nonce_is_valid(
+            request.market, request.trade_date, request.approval_nonce
+        ):
+            raise HTTPException(status_code=409, detail="invalid, expired, or reused approval code")
+        snapshot = experiment_manager.build_snapshot(request)
+        prepared_runtime = experiment_manager.register(
+            request, active=False, snapshot=snapshot
+        )
+        try:
+            approved = repository.approve_portfolio_experiment(request, snapshot)
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="duplicate experiment") from exc
+        if not approved:
+            experiment_manager.discard_prepared(prepared_runtime)
+            raise HTTPException(status_code=409, detail="invalid, expired, or reused approval code")
+        experiment_manager.activate(prepared_runtime)
+        await notifier.send_best_effort(
+            f"[{request.market.value}] 비교실험 시작: {request.experiment_id}\n"
+            f"GPT 전체: {', '.join(item.symbol for item in request.candidates)}\n"
+            f"사용자 선택: {', '.join(request.user_selected_symbols)}"
+        )
+        return PortfolioExperimentReceipt(
+            experiment_id=request.experiment_id,
+            status="ACTIVE",
+            cohorts=list(ExperimentCohort),
+            message="three isolated paper-only comparison cohorts are active",
+        )
+
+    @app.get("/v1/gpt-actions/experiments/{experiment_id}")
+    async def portfolio_experiment_status(
+        experiment_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict:
+        _require(settings.gpt_action_bearer, authorization)
+        result = experiment_manager.view(experiment_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="experiment not found")
+        return result
 
     @app.get("/v1/gpt-actions/plans/{plan_id}/status")
     async def plan_status(
@@ -199,6 +298,7 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
             "content_hash": row["content_hash"],
             "recent_events": repository.plan_events(plan_id),
             "strategy_states": strategy_states,
+            "candidate_guards": repository.candidate_guard_states(plan_id),
         }
 
     @app.post("/v1/market-data/ticks", status_code=202)
@@ -207,6 +307,8 @@ def create_app(settings: Settings | None = None, *, start_scheduler: bool = True
     ) -> dict:
         _require(settings.market_data_bearer, authorization)
         result = engine.process_tick(tick)
+        experiment_manager.process_tick(tick)
+        experiment_manager.maintenance()
         return {**result, "symbol": tick.symbol, "market": tick.market}
 
     @app.get("/v1/portfolios/{market}")

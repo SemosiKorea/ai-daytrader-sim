@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime, timedelta
 
 from daytrader.broker import PaperBroker
 from daytrader.config import CostConfig
-from daytrader.engine import TradingEngine
+from daytrader.engine import FeedState, TradingEngine
 from daytrader.market_clock import force_exit_at
 from daytrader.models import (
     CandidatePlan,
@@ -14,6 +14,7 @@ from daytrader.models import (
     OrderState,
     Predicate,
     RuleGroup,
+    TradePlan,
 )
 from daytrader.repository import Repository
 from daytrader.rules import CrossDebounceState, evaluate_group
@@ -136,6 +137,74 @@ def test_stop_uses_bid_and_gap_waits_for_emergency_exit(tmp_path) -> None:
     assert json.loads(sell["payload"])["price"] == 98.0
 
 
+def test_force_close_rejects_stale_cached_quote(tmp_path) -> None:
+    repository = Repository(tmp_path / "force-close.db")
+    broker = PaperBroker(repository, {"US": CostConfig(1_500, 0, 0, 0, 0)})
+    engine = TradingEngine(repository, broker)
+    now = datetime.now(UTC)
+    order, _ = broker.submit_entry("US_plan_force", candidate(), tick(now))
+    assert order
+    broker.process_pending(tick(now + timedelta(milliseconds=400)))
+    stale = tick(now - timedelta(seconds=10))
+    engine.latest_ticks[(Market.US, "NVDA")] = stale
+
+    result = engine.force_close_market(Market.US, now=now)
+
+    assert result["unpriced_symbols"] == ["NVDA"]
+    assert "NVDA" in broker.portfolios[Market.US].positions
+
+
+def test_performance_drawdown_includes_open_position_equity(tmp_path) -> None:
+    repository = Repository(tmp_path / "equity.db")
+    broker = PaperBroker(repository, {"US": CostConfig(1_500, 0, 0, 0, 0)})
+    now = datetime.now(UTC)
+    order, _ = broker.submit_entry("US_plan_equity", candidate(), tick(now))
+    assert order
+    broker.process_pending(tick(now + timedelta(milliseconds=400)))
+
+    broker.on_tick(
+        tick(now + timedelta(seconds=1), price=90.1, bid=90.0, ask=90.1)
+    )
+
+    performance = broker.performance(Market.US)
+    assert performance["closed_trades"] == 0
+    assert performance["net_pnl"] < 0
+    assert performance["max_drawdown_pct"] > 0
+
+
+def test_take_profit_exit_uses_bid_size_and_partial_fill_state(tmp_path) -> None:
+    repository = Repository(tmp_path / "partial-exit.db")
+    broker = PaperBroker(repository, {"US": CostConfig(1_500, 0, 0, 0, 0)})
+    now = datetime.now(UTC)
+    order, _ = broker.submit_entry("US_plan_partial_exit", candidate(), tick(now))
+    assert order
+    broker.process_pending(tick(now + timedelta(milliseconds=400), ask_size=100))
+    assert broker.portfolios[Market.US].positions["NVDA"].remaining == 5
+
+    broker.on_tick(
+        tick(now + timedelta(seconds=1), price=102.1, bid=102, ask=102.1)
+    )
+    broker.on_tick(
+        tick(
+            now + timedelta(seconds=1.4),
+            price=102.1,
+            bid=102,
+            ask=102.1,
+            bid_size=1,
+        )
+    )
+
+    position = broker.portfolios[Market.US].positions["NVDA"]
+    assert position.remaining == 4
+    assert position.exit_remaining_quantity == 2
+    states = [
+        json.loads(event["payload"])["state"]
+        for event in repository.recent_events(20)
+        if event["event_type"] == "ORDER_STATE_CHANGED"
+    ]
+    assert OrderState.PARTIALLY_FILLED.value in states
+
+
 def test_sequence_and_crossed_quotes_are_rejected(tmp_path) -> None:
     repository = Repository(tmp_path / "feed.db")
     broker = PaperBroker(repository, {"US": CostConfig(1_500, 0, 0, 0, 0)})
@@ -156,6 +225,43 @@ def test_sequence_and_crossed_quotes_are_rejected(tmp_path) -> None:
     )
     assert not crossed["accepted"]
     assert "CROSSED_MARKET" in crossed["reasons"]
+
+
+def test_identical_stale_data_rejections_are_aggregated(tmp_path) -> None:
+    repository = Repository(tmp_path / "stale-aggregate.db")
+    broker = PaperBroker(repository, {"US": CostConfig(1_500, 0, 0, 0, 0)})
+    engine = TradingEngine(repository, broker)
+    stale_at = datetime.now(UTC) - timedelta(seconds=10)
+
+    for sequence in range(100):
+        result = engine.process_tick(
+            tick(stale_at + timedelta(milliseconds=sequence), sequence=sequence + 1)
+        )
+        assert result == {"accepted": False, "reasons": ["STALE_DATA"]}
+
+    rejection_events = [
+        event
+        for event in repository.recent_events(200)
+        if event["event_type"].startswith("DATA_REJECTED")
+    ]
+    assert len(rejection_events) == 1
+    payload = json.loads(rejection_events[0]["payload"])
+    assert payload["details"]["aggregation"] == "initial"
+    aggregate = engine.rejection_aggregates[(Market.US, "NVDA", ("STALE_DATA",))]
+    assert aggregate.count == 100
+
+    recovered = engine.process_tick(tick(datetime.now(UTC), sequence=101))
+    assert recovered["accepted"]
+    rejection_events = [
+        event
+        for event in repository.recent_events(200)
+        if event["event_type"].startswith("DATA_REJECTED")
+    ]
+    assert len(rejection_events) == 2
+    summary = json.loads(rejection_events[0]["payload"])
+    assert summary["details"]["aggregate_count"] == 100
+    assert summary["details"]["aggregation"] == "flushed_on_recovery"
+    assert not engine.rejection_aggregates
 
 
 def test_halt_cancels_pending_order_and_resets_entry_state(tmp_path) -> None:
@@ -219,3 +325,63 @@ def test_us_early_close_uses_official_calendar() -> None:
     exit_at = force_exit_at(Market.US, date(2026, 11, 27))
     assert exit_at.hour == 12
     assert exit_at.minute == 50
+
+
+def _plan_with(candidate_plan: CandidatePlan, at: datetime) -> TradePlan:
+    return TradePlan(
+        plan_id="US_guard_plan_001",
+        market=Market.US,
+        trade_date=at.date(),
+        expires_at=at + timedelta(hours=8),
+        approval_nonce="000000",
+        approved_symbols=[candidate_plan],
+    )
+
+
+def test_opening_deviation_persistently_blocks_candidate(tmp_path) -> None:
+    repository = Repository(tmp_path / "guard.db")
+    broker = PaperBroker(repository, {"US": CostConfig(1_500, 0, 0, 0, 0)})
+    engine = TradingEngine(repository, broker)
+    at = datetime.now(UTC)
+    guarded = CandidatePlan.model_validate(
+        {
+            **candidate().model_dump(),
+            "premarket_guard": {
+                "reference_price": 100,
+                "max_open_deviation_pct": 1,
+            },
+        }
+    )
+    plan = _plan_with(guarded, at)
+    current = tick(
+        at,
+        price=102,
+        indicators={"regular_open_price": 102.0},
+        indicator_ready={"regular_open_price": True},
+        indicator_timestamps={"regular_open_price": at},
+    )
+
+    reasons = engine._premarket_guard_reasons(plan, guarded, current)
+
+    assert reasons == ["OPEN_DEVIATION_EXCEEDED"]
+    state = repository.candidate_guard_state(plan.plan_id, guarded.symbol)
+    assert state and state["reason"] == "OPEN_DEVIATION_EXCEEDED"
+    assert engine._premarket_guard_reasons(plan, guarded, current)[0].startswith(
+        "CANDIDATE_RISK_BLOCKED"
+    )
+
+
+def test_engine_does_not_submit_when_ask_exceeds_maximum_limit(tmp_path) -> None:
+    repository = Repository(tmp_path / "limit.db")
+    broker = PaperBroker(repository, {"US": CostConfig(1_500, 0, 0, 0, 0)})
+    engine = TradingEngine(repository, broker)
+    at = datetime(2026, 7, 16, 10, 0, tzinfo=UTC)
+    plan = _plan_with(candidate(), at)
+    current = tick(at, price=100, bid=100, ask=100.1)
+    feed = FeedState(at, at, 1, "test-feed", "regular")
+
+    engine._try_entry(plan, candidate(), current, feed)
+
+    assert broker.portfolios[Market.US].pending_orders == {}
+    rejection = repository.recent_events(1)[0]
+    assert "MAX_BUY_LIMIT_EXCEEDED" in json.loads(rejection["payload"])["reasons"]
